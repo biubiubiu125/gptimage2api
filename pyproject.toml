@@ -1,0 +1,40 @@
+[project]
+name = "gptimage2api"
+version = "1.0.1"
+description = "OpenAI-compatible image generation API with durable queue and account registration"
+readme = "README.md"
+license = "AGPL-3.0-only"
+authors = [{ name = "biubiubiu125" }]
+requires-python = ">=3.13"
+dependencies = [
+    "cryptography>=46.0.0",
+    "curl-cffi>=0.15.0",
+    "fastapi>=0.136.0",
+    "pillow>=12.2.0",
+    "pybase64>=1.4.3",
+    "python-multipart>=0.0.26",
+    "tiktoken>=0.12.0",
+    "uvicorn>=0.44.0",
+    "sqlalchemy>=2.0.0",
+    "psycopg2-binary>=2.9.0",
+    "psutil>=7.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=8.4.2,<10",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["api*", "contracts*", "services*", "utils*"]
+exclude = ["tests*", "web-vue*", "deploy*"]

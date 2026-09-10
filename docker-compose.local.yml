@@ -1,0 +1,97 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: gptimage2api-local-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gptimage2api_app
+      POSTGRES_USER: ${POSTGRES_USER:-gptimage2api}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - gptimage2api-local-postgres-data:/var/lib/postgresql
+      - ./deploy/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  app:
+    depends_on:
+      postgres:
+        condition: service_healthy
+      image-queue-init:
+        condition: service_completed_successfully
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gptimage2api:local
+    container_name: gptimage2api-local
+    ports:
+      - "8000:80"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1/health', timeout=5)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    volumes:
+      - ./data:/app/data
+      - ./config.json:/app/config.json
+    environment:
+      GPTIMAGE2API_AUTH_KEY: ${GPTIMAGE2API_AUTH_KEY:-}
+      GPTIMAGE2API_REGISTER_RECOVERY_KEY: ${GPTIMAGE2API_REGISTER_RECOVERY_KEY:-}
+      GPTIMAGE2API_BASE_URL: ${GPTIMAGE2API_BASE_URL:-}
+      GPTIMAGE2API_GITHUB_REPOSITORY: ${GPTIMAGE2API_GITHUB_REPOSITORY:-biubiubiu125/gptimage2api}
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-gptimage2api}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/gptimage2api_app"
+      GPTIMAGE2API_IMAGE_QUEUE_DATABASE_URL: "postgresql://${POSTGRES_USER:-gptimage2api}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/gptimage2api_image_queue"
+      GPTIMAGE2API_IMAGE_QUEUE_ARTIFACT_ROOT: ${GPTIMAGE2API_IMAGE_QUEUE_ARTIFACT_ROOT:-data/images}
+      GPTIMAGE2API_IMAGE_QUEUE_GENERATION_CONCURRENCY: ${GPTIMAGE2API_IMAGE_QUEUE_GENERATION_CONCURRENCY:-4}
+      GPTIMAGE2API_IMAGE_QUEUE_MAX_BACKLOG: ${GPTIMAGE2API_IMAGE_QUEUE_MAX_BACKLOG:-256}
+      GPTIMAGE2API_IMAGE_DOWNLOAD_MAX_BYTES: ${GPTIMAGE2API_IMAGE_DOWNLOAD_MAX_BYTES:-52428800}
+      POSTGRES_USER: ${POSTGRES_USER:-gptimage2api}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      TZ: ${TZ:-Asia/Shanghai}
+    # 本地 Compose 与生产 Compose 保持相同的单体边界：一个 App、一个 PostgreSQL，
+    # PostgreSQL 内分离 Application Database 与 Image Queue Store。
+
+    # 认证密钥 (可选，覆盖 config.json)
+    #   GPTIMAGE2API_AUTH_KEY: your_secret_key
+
+    # 基础 URL (可选)
+    #   GPTIMAGE2API_BASE_URL: https://your-domain.com
+
+  image-queue-init:
+    image: postgres:18-alpine
+    container_name: gptimage2api-local-image-queue-init
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_DB: gptimage2api_app
+      POSTGRES_USER: ${POSTGRES_USER:-gptimage2api}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    entrypoint: ["sh", "-ec"]
+    command: |
+      export PGPASSWORD="$${POSTGRES_PASSWORD}"
+      if ! psql -h postgres -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" -tAc \
+        "SELECT 1 FROM pg_database WHERE datname = 'gptimage2api_image_queue'" | grep -q 1; then
+        createdb -h postgres -U "$${POSTGRES_USER}" gptimage2api_image_queue
+      fi
+
+volumes:
+  gptimage2api-local-postgres-data:
