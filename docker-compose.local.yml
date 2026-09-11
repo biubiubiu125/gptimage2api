@@ -3,6 +3,8 @@ services:
     image: postgres:18-alpine
     container_name: gptimage2api-local-postgres
     restart: unless-stopped
+    networks:
+      - gptimage2api-local-network
     environment:
       POSTGRES_DB: gptimage2api_app
       POSTGRES_USER: ${POSTGRES_USER:-gptimage2api}
@@ -32,6 +34,8 @@ services:
       dockerfile: Dockerfile
     image: gptimage2api:local
     container_name: gptimage2api-local
+    networks:
+      - gptimage2api-local-network
     ports:
       - "8000:80"
     healthcheck:
@@ -78,6 +82,8 @@ services:
     image: postgres:18-alpine
     container_name: gptimage2api-local-image-queue-init
     restart: "no"
+    networks:
+      - gptimage2api-local-network
     depends_on:
       postgres:
         condition: service_healthy
@@ -95,3 +101,8 @@ services:
 
 volumes:
   gptimage2api-local-postgres-data:
+
+networks:
+  gptimage2api-local-network:
+    name: gptimage2api-local-network
+    driver: bridge

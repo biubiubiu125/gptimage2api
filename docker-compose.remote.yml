@@ -3,6 +3,8 @@ services:
     image: ${GPTIMAGE2API_IMAGE:-gptimage2api:latest}
     container_name: gptimage2api
     restart: unless-stopped
+    networks:
+      - gptimage2api-network
     ports:
       - "${GPTIMAGE2API_PORT:-3000}:80"
     healthcheck:
@@ -38,3 +40,8 @@ services:
 
 volumes:
   gptimage2api-runtime:
+
+networks:
+  gptimage2api-network:
+    name: gptimage2api-network
+    driver: bridge

@@ -34,7 +34,7 @@ POSTGRES_PASSWORD=replace_with_a_strong_password
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
 ```
 
-`docker-compose.postgres.yml` 使用官方 `postgres:18-alpine` 镜像，等待数据库健康后由一次性 `image-queue-init` 服务幂等创建队列数据库，再启动应用，并将数据持久化到 `gptimage2api-postgres-data` 命名卷。Application Database 固定为 `gptimage2api_app`，Image Queue Store 固定为 `gptimage2api_image_queue`；PostgreSQL 健康检查只负责报告可用性，不执行写入操作。数据库端口默认不暴露到宿主机。
+`docker-compose.postgres.yml` 使用官方 `postgres:18-alpine` 镜像，等待数据库健康后由一次性 `image-queue-init` 服务幂等创建队列数据库，再启动应用，并将数据持久化到 `gptimage2api-postgres-data` 命名卷。Application Database 固定为 `gptimage2api_app`，Image Queue Store 固定为 `gptimage2api_image_queue`；PostgreSQL 健康检查只负责报告可用性，不执行写入操作。数据库端口默认不暴露到宿主机。应用、PostgreSQL 和队列初始化都加入独立网 `gptimage2api-network`，不和其他 Compose 项目共用默认桥接。
 
 `POSTGRES_PASSWORD` 会同时用于初始化数据库和构造 `DATABASE_URL`，因此请仅使用 URL 安全字符（字母、数字、下划线或连字符），不要在两个位置分别编码密码。数据库名不可通过 `POSTGRES_DB` 改名。
 启用该模式后，后续启动、升级、查看状态和停止服务都应同时指定这两个 Compose 文件。

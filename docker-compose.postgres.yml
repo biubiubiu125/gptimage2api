@@ -3,6 +3,8 @@ services:
     image: postgres:18-alpine
     container_name: gptimage2api-postgres
     restart: unless-stopped
+    networks:
+      - gptimage2api-network
     environment:
       POSTGRES_DB: gptimage2api_app
       POSTGRES_USER: ${POSTGRES_USER:-gptimage2api}
@@ -41,6 +43,8 @@ services:
     image: postgres:18-alpine
     container_name: gptimage2api-image-queue-init
     restart: "no"
+    networks:
+      - gptimage2api-network
     depends_on:
       postgres:
         condition: service_healthy
@@ -58,3 +62,8 @@ services:
 
 volumes:
   gptimage2api-postgres-data:
+
+networks:
+  gptimage2api-network:
+    name: gptimage2api-network
+    driver: bridge
