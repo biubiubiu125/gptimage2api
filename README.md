@@ -41,7 +41,7 @@
 curl -fsSL https://raw.githubusercontent.com/biubiubiu125/gptimage2api/main/deploy/install.sh | sudo bash
 ```
 
-安装向导默认中文和 Docker，回车即采用默认值并立刻显示已选项。数据库固定为 PostgreSQL 18 本地容器，代码固定拉 `main`。管理员登录密钥需输入两次且不会回显。摘要确认后才开始拉镜像或克隆。脚本会写入 `GPTIMAGE2API_GITHUB_REPOSITORY=biubiubiu125/gptimage2api`，供控制台检查 GitHub Release 并一键更新。
+安装向导默认中文和 Docker，回车即采用默认值并立刻显示已选项。数据库固定为 PostgreSQL 18 本地容器，代码固定拉 `main`。向导会询问图片访问地址并写入 `GPTIMAGE2API_BASE_URL`，默认 `http://localhost:<端口>`。管理员登录密钥需输入两次且不会回显。摘要确认后才开始拉镜像或克隆。脚本会写入 `GPTIMAGE2API_GITHUB_REPOSITORY=biubiubiu125/gptimage2api`，供控制台检查 GitHub Release 并一键更新。
 
 ### Docker Compose
 
@@ -57,8 +57,8 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 
 | 入口            | 地址                       |
 | :-------------- | :------------------------- |
-| 管理控制台      | `http://localhost:3000`    |
-| OpenAI 兼容 API | `http://localhost:3000/v1` |
+| 管理控制台      | `http://localhost:2080`    |
+| OpenAI 兼容 API | `http://localhost:2080/v1` |
 | 数据目录        | `./data`                   |
 
 `.env` 中的 `GPTIMAGE2API_AUTH_KEY` 优先于 `config.json` 的 `auth-key`。Compose 使用独立运行时卷支持控制台在线更新；控制台设置、账号、用户密钥、调用日志和指标写入 Application Database，图片任务写入独立队列库。不要提交本地 `.env`、`config.json` 或 `data/`。
@@ -150,7 +150,7 @@ Authorization: Bearer <auth-key>
 <summary>Chat Completions 示例</summary>
 
 ```bash
-curl http://localhost:3000/v1/chat/completions \
+curl http://localhost:2080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <auth-key>" \
   -d '{"model":"gpt-5","messages":[{"role":"user","content":"介绍一下这个项目"}],"stream":true}'
@@ -162,7 +162,7 @@ curl http://localhost:3000/v1/chat/completions \
 <summary>图片生成示例</summary>
 
 ```bash
-curl http://localhost:3000/v1/images/generations \
+curl http://localhost:2080/v1/images/generations \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <auth-key>" \
   -H "Idempotency-Key: unique-request-id" \

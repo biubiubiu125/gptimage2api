@@ -102,7 +102,7 @@ def _types_compatible(expected, actual) -> bool:
 _NO_DEFAULT = object()
 
 
-def _migration_default_value(table_name: str, column_name: str) -> object:
+def _migration_default_value(table_name: str, column_name: str, column=None) -> object:
     if column_name in {
         "id",
         "account_id",
@@ -142,6 +142,12 @@ def _migration_default_value(table_name: str, column_name: str) -> object:
         "save_attempts",
         "lease_version",
         "quota_accounting_attempts",
+        "succeeded_jobs",
+        "failed_jobs",
+        "effective_concurrency",
+        "byte_size",
+        "width",
+        "height",
     }:
         return 0
     if column_name in {"effective_prompt", "original_prompt", "owner_key", "request_hash", "task_type", "public_model"}:
@@ -151,8 +157,20 @@ def _migration_default_value(table_name: str, column_name: str) -> object:
             "task_type": "generation",
             "public_model": "gpt-image-2",
         }.get(column_name, "")
-    if column_name in {"byte_size", "width", "height"}:
-        return 0
+    if column is not None:
+        family = _type_family(column.type)
+        if family in {"integer", "bigint"}:
+            return 0
+        if family == "boolean":
+            return False
+        if family == "json":
+            return {}
+        if family == "datetime":
+            return utc_now()
+        if family == "binary":
+            return b""
+        if family == "uuid":
+            return _NO_DEFAULT
     return ""
 
 
@@ -185,6 +203,22 @@ def _coerce_migration_value(column, value: object) -> object:
             return datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
             return utc_now()
+    if family in {"integer", "bigint"}:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            raw = value.strip()
+            if raw == "":
+                return 0
+            try:
+                return int(raw)
+            except ValueError:
+                return 0
+        if isinstance(value, float):
+            return int(value)
+        return 0
     return value
 
 
@@ -291,7 +325,7 @@ def _sqlite_migrated_rows(
             if value is _NO_DEFAULT:
                 value = None
             if value is None and not column.nullable:
-                value = _migration_default_value(table.name, column.name)
+                value = _migration_default_value(table.name, column.name, column)
             if value is _NO_DEFAULT:
                 value = None
             raw_key = str(value).strip() if value is not None else ""
@@ -367,7 +401,7 @@ def _set_null_default(connection, table, column_name: str, value: object) -> Non
     connection.execute(
         table.update()
         .where(column.is_(None))
-        .values({column_name: value})
+        .values({column_name: _coerce_migration_value(column, value)})
     )
 
 
@@ -523,7 +557,7 @@ def _backfill_schema_defaults(connection) -> None:
         for column in table.columns:
             if column.nullable:
                 continue
-            default = _migration_default_value(table.name, column.name)
+            default = _migration_default_value(table.name, column.name, column)
             if default is _NO_DEFAULT:
                 continue
             _set_null_default(connection, table, column.name, default)

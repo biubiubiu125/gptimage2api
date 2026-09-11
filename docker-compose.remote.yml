@@ -6,7 +6,7 @@ services:
     networks:
       - gptimage2api-network
     ports:
-      - "${GPTIMAGE2API_PORT:-3000}:80"
+      - "${GPTIMAGE2API_PORT:-2080}:80"
     healthcheck:
       test:
         [

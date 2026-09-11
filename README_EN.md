@@ -41,7 +41,7 @@
 curl -fsSL https://raw.githubusercontent.com/biubiubiu125/gptimage2api/main/deploy/install.sh | sudo bash
 ```
 
-The setup wizard defaults to Chinese and Docker; pressing Enter keeps each default and prints the chosen value. The database is always a local PostgreSQL 18 container, and source is always `main`. The admin login key must be typed twice and is never echoed. Installation starts only after the summary is confirmed. The installer writes `GPTIMAGE2API_GITHUB_REPOSITORY=biubiubiu125/gptimage2api` so the console can check GitHub Releases and apply one-click updates.
+The setup wizard defaults to Chinese and Docker; pressing Enter keeps each default and prints the chosen value. The database is always a local PostgreSQL 18 container, and source is always `main`. The wizard asks for the image access URL and writes `GPTIMAGE2API_BASE_URL`, defaulting to `http://localhost:<port>`. The admin login key must be typed twice and is never echoed. Installation starts only after the summary is confirmed. The installer writes `GPTIMAGE2API_GITHUB_REPOSITORY=biubiubiu125/gptimage2api` so the console can check GitHub Releases and apply one-click updates.
 
 ### Docker Compose
 
@@ -57,8 +57,8 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 
 | Endpoint | Address |
 | :--- | :--- |
-| Admin console | `http://localhost:3000` |
-| OpenAI-compatible API | `http://localhost:3000/v1` |
+| Admin console | `http://localhost:2080` |
+| OpenAI-compatible API | `http://localhost:2080/v1` |
 | Data directory | `./data` |
 
 `GPTIMAGE2API_AUTH_KEY` in `.env` takes precedence over `auth-key` in `config.json`. Compose uses a dedicated runtime volume for console-managed online updates. Console settings, upstream accounts, user keys, call records, and metrics are stored in the Application Database, while image tasks use a separate PostgreSQL queue database. Do not commit local `.env`, `config.json`, or `data/` files.
@@ -153,7 +153,7 @@ Creating, querying, deleting, and downloading file tasks are isolated by API key
 <summary>Chat Completions example</summary>
 
 ```bash
-curl http://localhost:3000/v1/chat/completions \
+curl http://localhost:2080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <auth-key>" \
   -d '{"model":"gpt-5","messages":[{"role":"user","content":"Introduce this project"}],"stream":true}'
@@ -165,7 +165,7 @@ curl http://localhost:3000/v1/chat/completions \
 <summary>Image generation example</summary>
 
 ```bash
-curl http://localhost:3000/v1/images/generations \
+curl http://localhost:2080/v1/images/generations \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <auth-key>" \
   -H "Idempotency-Key: unique-request-id" \

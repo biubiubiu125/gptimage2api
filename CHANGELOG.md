@@ -6,8 +6,11 @@
 + [修复] 配置目录合并 Web 图片 2.5 别名时忽略大小写；公开队列门禁不再和 helper 里另一套同名模型集合混用。
 + [优化] 一键安装改为分步向导：回车显示默认值，固定仓库 `main` 与本地 PostgreSQL 18，管理员密钥隐藏确认且不能空过，摘要确认后才开始安装。
 + [优化] Docker Compose 使用独立网 `gptimage2api-network`（本地为 `gptimage2api-local-network`），应用和 PostgreSQL 不再走默认桥接。
++ [优化] 安装脚本和标准 Compose 的默认 Web/API 端口改为 `2080`。
++ [优化] 安装向导增加图片访问地址，写入 `GPTIMAGE2API_BASE_URL`；默认 `http://localhost:<端口>`，须为 http/https 且路径为空或 `/images`。
 + [修复] Python 安装模式把 PostgreSQL 只绑到 `127.0.0.1`，启动前先打印就绪地址和打码密钥，历史改写后无法快进时提示删目录重装。
 + [修复] 安装向导横幅在选语言前使用中英对照；端口和并发在输入时校验，不再等到确认后才失败。
++ [修复] 图片队列 schema 回填不再把整数字段写成空字符串，避免 PostgreSQL 新装启动失败。
 
 ## 1.0.1 - 2026-09-11
 

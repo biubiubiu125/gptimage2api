@@ -5,8 +5,9 @@ REPO_OWNER="${REPO_OWNER:-biubiubiu125}"
 REPO_NAME="${REPO_NAME:-gptimage2api}"
 BRANCH="main"
 INSTALL_DIR="${INSTALL_DIR:-/opt/gptimage2api}"
-PORT="${GPTIMAGE2API_PORT:-${PORT:-3000}}"
+PORT="${GPTIMAGE2API_PORT:-${PORT:-2080}}"
 THREAD_TOKENS="${GPTIMAGE2API_THREAD_TOKENS:-${THREAD_TOKENS:-120}}"
+BASE_URL="${GPTIMAGE2API_BASE_URL:-${BASE_URL:-}}"
 MODE="${MODE:-}"
 AUTH_KEY="${GPTIMAGE2API_AUTH_KEY:-${AUTH_KEY:-}}"
 DATABASE_MODE="postgres-local"
@@ -37,7 +38,8 @@ EOF
   printf '\n%s\n' "$(text usage_env)"
   cat <<'EOF'
   INSTALL_DIR=/opt/gptimage2api
-  PORT=3000
+  PORT=2080
+  GPTIMAGE2API_BASE_URL=https://your-domain.com
   GPTIMAGE2API_THREAD_TOKENS=120
   MODE=docker|python
   AUTH_KEY=your-auth-key
@@ -49,7 +51,8 @@ EOF
   printf '\n%s\n' "$(text usage_flags)"
   cat <<'EOF'
   --mode docker|python
-  --port 3000
+  --port 2080
+  --base-url https://your-domain.com
   --thread-tokens 120
   --install-dir /opt/gptimage2api
   --auth-key your-auth-key
@@ -98,7 +101,7 @@ print_step() {
   local title="$2"
   local hint="$3"
   ui_println ""
-  ui_println "----- $(text step_prefix) ${index}/6：${title} -----"
+  ui_println "----- $(text step_prefix) ${index}/7：${title} -----"
   ui_println "${hint}"
 }
 
@@ -126,6 +129,8 @@ text() {
       label_mode_python) printf 'Python source' ;;
       step_port) printf 'Web/API port' ;;
       hint_port) printf 'Browser and API clients will use this host port.' ;;
+      step_base_url) printf 'Image access URL' ;;
+      hint_base_url) printf 'Prefix used in returned image URLs. Use a public domain or IP that clients can open, for example https://img.example.com.' ;;
       step_thread_tokens) printf 'Backend sync concurrency' ;;
       hint_thread_tokens) printf 'Thread tokens for backend sync work. Image generation uses a separate queue limit.' ;;
       step_dir) printf 'Install directory' ;;
@@ -134,6 +139,7 @@ text() {
       hint_auth) printf 'Used to sign in to the console. Input is hidden. It cannot be empty, and you must type it twice.' ;;
       prompt_select) printf 'Select' ;;
       prompt_port) printf 'Web/API port' ;;
+      prompt_base_url) printf 'Image access URL' ;;
       prompt_thread_tokens) printf 'Backend sync concurrency (thread tokens)' ;;
       prompt_dir) printf 'Install directory' ;;
       prompt_auth) printf 'Admin login key' ;;
@@ -148,6 +154,7 @@ text() {
       summary_language) printf 'Language' ;;
       summary_mode) printf 'Run mode' ;;
       summary_port) printf 'Port' ;;
+      summary_base_url) printf 'Image URL' ;;
       summary_tokens) printf 'Concurrency' ;;
       summary_dir) printf 'Directory' ;;
       summary_database) printf 'Database' ;;
@@ -163,6 +170,7 @@ text() {
       err_unknown_arg) printf 'Unknown argument' ;;
       err_mode) printf 'MODE must be docker or python.' ;;
       err_port) printf 'PORT must be a number.' ;;
+      err_base_url) printf 'Image access URL must be an http or https address without query or fragment. Path must be empty or /images.' ;;
       err_thread_tokens) printf 'GPTIMAGE2API_THREAD_TOKENS must be a positive number.' ;;
       err_postgres_password) printf 'POSTGRES_PASSWORD may only contain letters, numbers, underscores, and hyphens.' ;;
       err_frontend) printf 'npm is unavailable and no built frontend was found. Install Node.js/npm or provide web_dist/index.html.' ;;
@@ -180,6 +188,7 @@ text() {
       info_install_py) printf 'Installing Python dependencies...' ;;
       info_start_app) printf 'Starting GPTImage2API on' ;;
       done_ready) printf 'GPTImage2API is ready' ;;
+      done_base_url) printf 'Image access URL' ;;
       done_auth) printf 'Admin auth key' ;;
       *) printf '%s' "${key}" ;;
     esac
@@ -207,6 +216,8 @@ text() {
     label_mode_python) printf 'Python 源码运行' ;;
     step_port) printf 'Web/API 端口' ;;
     hint_port) printf '浏览器打开控制台、调用 API 都走这个端口。' ;;
+    step_base_url) printf '图片访问地址' ;;
+    hint_base_url) printf '用来生成图片结果的访问前缀。外网调用请填客户端能打开的域名或 IP，例如 https://img.example.com。' ;;
     step_thread_tokens) printf '后端同步并发' ;;
     hint_thread_tokens) printf '这是后端同步工作的线程令牌，不是图片队列并发。一般保持默认即可。' ;;
     step_dir) printf '安装目录' ;;
@@ -215,6 +226,7 @@ text() {
     hint_auth) printf '用来登录管理控制台。输入时不显示。不能空回车，必须输入两次且一致。' ;;
     prompt_select) printf '请选择' ;;
     prompt_port) printf 'Web/API 端口' ;;
+    prompt_base_url) printf '图片访问地址' ;;
     prompt_thread_tokens) printf '后端同步并发容量（线程令牌）' ;;
     prompt_dir) printf '安装目录' ;;
     prompt_auth) printf '管理员登录密钥' ;;
@@ -229,6 +241,7 @@ text() {
     summary_language) printf '界面语言' ;;
     summary_mode) printf '运行方式' ;;
     summary_port) printf '端口' ;;
+    summary_base_url) printf '图片访问地址' ;;
     summary_tokens) printf '并发' ;;
     summary_dir) printf '安装目录' ;;
     summary_database) printf '数据库' ;;
@@ -244,6 +257,7 @@ text() {
     err_unknown_arg) printf '未知参数' ;;
     err_mode) printf '运行模式只能是 docker 或 python。' ;;
     err_port) printf '端口必须是数字。' ;;
+    err_base_url) printf '图片访问地址必须是 http 或 https，不能带查询参数或片段，路径只能为空或 /images。' ;;
     err_thread_tokens) printf 'GPTIMAGE2API_THREAD_TOKENS 必须是正整数。' ;;
     err_postgres_password) printf 'POSTGRES_PASSWORD 只能包含字母、数字、下划线和连字符。' ;;
     err_frontend) printf '未找到 npm，且没有可用的前端构建结果。请安装 Node.js/npm，或提供 web_dist/index.html。' ;;
@@ -261,6 +275,7 @@ text() {
     info_install_py) printf '正在安装 Python 依赖...' ;;
     info_start_app) printf '正在启动 GPTImage2API' ;;
     done_ready) printf 'GPTImage2API 已就绪' ;;
+    done_base_url) printf '图片访问地址' ;;
     done_auth) printf '管理员登录密钥' ;;
     *) printf '%s' "${key}" ;;
   esac
@@ -425,6 +440,9 @@ configure_database() {
   if [[ -z "${POSTGRES_PASSWORD}" ]]; then
     POSTGRES_PASSWORD="$(generate_secret)"
   fi
+  if [[ -z "${BASE_URL}" ]]; then
+    BASE_URL="$(read_existing_env_value GPTIMAGE2API_BASE_URL)"
+  fi
 
   if [[ "${MODE}" == "python" ]]; then
     DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_HOST_PORT}/${POSTGRES_DB}"
@@ -469,6 +487,10 @@ parse_args() {
         PORT="${2:-}"
         shift 2
         ;;
+      --base-url)
+        BASE_URL="${2:-}"
+        shift 2
+        ;;
       --thread-tokens)
         THREAD_TOKENS="${2:-}"
         shift 2
@@ -502,6 +524,29 @@ parse_args() {
   done
 }
 
+normalize_base_url() {
+  local value="${1-}"
+  local rest=""
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  while [[ "${value}" == */ ]]; do
+    value="${value%/}"
+  done
+  if [[ "${value}" =~ ^[Hh][Tt][Tt][Pp][Ss]:// ]]; then
+    rest="${value#*://}"
+    value="https://${rest}"
+  elif [[ "${value}" =~ ^[Hh][Tt][Tt][Pp]:// ]]; then
+    rest="${value#*://}"
+    value="http://${rest}"
+  fi
+  printf '%s' "${value}"
+}
+
+is_valid_base_url() {
+  local value="${1-}"
+  [[ "${value}" =~ ^https?://[^/?#]+(/images)?$ ]]
+}
+
 validate_inputs() {
   local normalized=""
 
@@ -510,6 +555,12 @@ validate_inputs() {
 
   if [[ -z "${PORT}" || ! "${PORT}" =~ ^[0-9]+$ ]]; then
     echo "[$(text prefix_error)] $(text err_port)" >&2
+    exit 1
+  fi
+
+  BASE_URL="$(normalize_base_url "${BASE_URL}")"
+  if ! is_valid_base_url "${BASE_URL}"; then
+    echo "[$(text prefix_error)] $(text err_base_url)" >&2
     exit 1
   fi
 
@@ -535,6 +586,7 @@ print_summary() {
   ui_println "  $(text summary_language): $(language_label)"
   ui_println "  $(text summary_mode): $(mode_label "${MODE}")"
   ui_println "  $(text summary_port): ${PORT}"
+  ui_println "  $(text summary_base_url): ${BASE_URL}"
   ui_println "  $(text summary_tokens): ${THREAD_TOKENS}"
   ui_println "  $(text summary_dir): ${INSTALL_DIR}"
   ui_println "  $(text summary_database): $(text label_database)"
@@ -655,7 +707,7 @@ GPTIMAGE2API_AUTH_KEY=$(dotenv_quote "${AUTH_KEY}")
 GPTIMAGE2API_PORT=$(dotenv_quote "${PORT}")
 GPTIMAGE2API_THREAD_TOKENS=$(dotenv_quote "${THREAD_TOKENS}")
 GPTIMAGE2API_IMAGE=$(dotenv_quote "$(default_image)")
-GPTIMAGE2API_BASE_URL=$(dotenv_quote "")
+GPTIMAGE2API_BASE_URL=$(dotenv_quote "${BASE_URL}")
 GPTIMAGE2API_GITHUB_REPOSITORY=$(dotenv_quote "${REPO_OWNER}/${REPO_NAME}")
 DATABASE_URL=$(dotenv_quote "${DATABASE_URL}")
 GPTIMAGE2API_IMAGE_QUEUE_DATABASE_URL=$(dotenv_quote "${IMAGE_QUEUE_DATABASE_URL}")
@@ -775,6 +827,7 @@ mask_secret() {
 print_ready() {
   ui_println ""
   ui_println "[$(text prefix_done)] $(text done_ready): http://localhost:${PORT}"
+  ui_println "[$(text prefix_done)] $(text done_base_url): ${BASE_URL}"
   ui_println "[$(text prefix_done)] $(text done_auth): $(mask_secret "${AUTH_KEY}") (saved in .env and config.json)"
 }
 
@@ -812,7 +865,20 @@ main() {
   INSTALL_DIR="$(prompt_input "$(text prompt_dir)" "${INSTALL_DIR}")"
   configure_database
 
-  print_step "6" "$(text step_auth)" "$(text hint_auth)"
+  if [[ -z "${BASE_URL}" ]]; then
+    BASE_URL="http://localhost:${PORT}"
+  fi
+  print_step "6" "$(text step_base_url)" "$(text hint_base_url)"
+  while true; do
+    BASE_URL="$(normalize_base_url "$(prompt_input "$(text prompt_base_url)" "${BASE_URL}" "0")")"
+    if is_valid_base_url "${BASE_URL}"; then
+      echo_selected "${BASE_URL}"
+      break
+    fi
+    ui_println "[$(text prefix_error)] $(text err_base_url)"
+  done
+
+  print_step "7" "$(text step_auth)" "$(text hint_auth)"
   if [[ -z "${AUTH_KEY}" || "${AUTH_KEY}" == "your_secret_key_here" ]]; then
     AUTH_KEY="$(prompt_secret_confirmed)"
   else
