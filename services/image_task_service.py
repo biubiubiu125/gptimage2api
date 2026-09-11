@@ -65,6 +65,10 @@ def _clean(value: object, default: str = "") -> str:
     return str(value or default).strip()
 
 
+def job_conversation_model(context: Mapping[str, object]) -> str:
+    return _clean(context.get("public_model"), "gpt-image-2")
+
+
 def _clean_client_task_id(value: object) -> str:
     client_task_id = _clean(value)
     if len(client_task_id) > MAX_CLIENT_TASK_ID_LENGTH:
@@ -2217,7 +2221,7 @@ class ImageTaskService:
             else:
                 checkpoint(JobCheckpoint(stage=JobStage.GENERATING))
                 outputs = self.job_generator(ConversationRequest(
-                    model=_clean(context.get("public_model"), "gpt-image-2"),
+                    model=job_conversation_model(context),
                     prompt=_clean(context.get("effective_prompt")),
                     images=encoded_images,
                     n=1,

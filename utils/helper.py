@@ -16,15 +16,20 @@ from fastapi import HTTPException
 from services.browser_fingerprint import CHROME146_USER_AGENT
 from utils.log import logger
 
-BASE_IMAGE_MODELS = {"gpt-image-2", "codex-gpt-image-2"}
-IMAGE_MODEL_PLAN_TYPES = ("plus", "team", "pro")
+WEB_IMAGE_MODELS = (
+    "gpt-image-2",
+    "gpt-image-2.5",
+    "gpt-image-2.5-flare",
+    "gpt-image-2.5-sunburst",
+)
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
+BASE_IMAGE_MODELS = {*WEB_IMAGE_MODELS, CODEX_IMAGE_MODEL}
+IMAGE_MODEL_PLAN_TYPES = ("plus", "team", "pro")
 PREFIXED_CODEX_IMAGE_MODELS = {
     f"{plan_type}-{CODEX_IMAGE_MODEL}"
     for plan_type in IMAGE_MODEL_PLAN_TYPES
 }
 IMAGE_MODELS = BASE_IMAGE_MODELS | PREFIXED_CODEX_IMAGE_MODELS
-PUBLIC_IMAGE_MODELS = BASE_IMAGE_MODELS | PREFIXED_CODEX_IMAGE_MODELS
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 SUPPORTED_JSON_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
@@ -134,7 +139,7 @@ def is_supported_image_model(model: object) -> bool:
 
 def is_non_public_image_model(model: object) -> bool:
     normalized = str(model or "").strip().lower()
-    if not normalized or normalized in PUBLIC_IMAGE_MODELS:
+    if not normalized or normalized in WEB_IMAGE_MODELS:
         return False
     if normalized in IMAGE_MODELS:
         return True

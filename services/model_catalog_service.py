@@ -13,7 +13,7 @@ from contracts.models import (
 )
 from services.account_service import account_service
 from services.config import config
-from utils.helper import CODEX_IMAGE_MODEL
+from utils.helper import CODEX_IMAGE_MODEL, WEB_IMAGE_MODELS
 
 
 FALLBACK_CHAT_MODELS = [
@@ -27,9 +27,7 @@ FALLBACK_CHAT_MODELS = [
     "gpt-5-mini",
 ]
 
-FALLBACK_IMAGE_MODELS = [
-    "gpt-image-2",
-]
+FALLBACK_IMAGE_MODELS = list(WEB_IMAGE_MODELS)
 
 
 def _normalize_list(raw: object) -> list[str]:
@@ -87,7 +85,7 @@ def _image_models_from_accounts(accounts: list[dict[str, Any]]) -> list[str]:
     if not available_accounts:
         return []
 
-    models: list[str] = ["gpt-image-2"]
+    models: list[str] = list(WEB_IMAGE_MODELS)
     codex_types = {
         normalized
         for account in available_accounts
@@ -105,6 +103,14 @@ def _image_models_from_accounts(accounts: list[dict[str, Any]]) -> list[str]:
 
 def _unique(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
+
+
+def merge_web_image_aliases(models: list[str]) -> list[str]:
+    existing_lower = {str(model or "").strip().lower() for model in models}
+    if not existing_lower.intersection(WEB_IMAGE_MODELS):
+        return models
+    missing = [model for model in WEB_IMAGE_MODELS if model not in existing_lower]
+    return _unique([*models, *missing])
 
 
 def _generated_at() -> str:
@@ -134,11 +140,11 @@ class ModelCatalogService:
 
         if configured_image_models:
             image_source = "config"
-            image_models = _unique(configured_image_models)
+            image_models = merge_web_image_aliases(_unique(configured_image_models))
         else:
             account_models = _image_models_from_accounts(account_service.list_accounts())
             image_source = "accounts" if account_models else "fallback"
-            image_models = _unique(account_models or list(FALLBACK_IMAGE_MODELS))
+            image_models = merge_web_image_aliases(_unique(account_models or list(FALLBACK_IMAGE_MODELS)))
 
         all_models = _unique([*chat_models, *image_models])
         high_resolution_models = [

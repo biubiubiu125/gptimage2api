@@ -17,6 +17,7 @@ assert(registerApi.includes("'/api/register'"), 'register API client must call /
 assert(!registerApi.includes('/api/register/gptmail'), 'register API client must not expose removed provider runtime endpoints')
 
 const imageTasks = read('src/api/imageTasks.ts')
+assert(imageTasks.includes("DEFAULT_IMAGE_MODEL = 'gpt-image-2'"), 'Studio default image model must stay gpt-image-2')
 assert(imageTasks.includes('return localImageUrl(asset.path)'), 'image task assets must render path-only results')
 assert(imageTasks.includes('cancel: boolean'), 'image task actions must expose cancellation state')
 assert(imageTasks.includes('`/api/image-tasks/${encodeURIComponent(taskId)}/cancel`'), 'image task API must call the cancel endpoint')
@@ -34,6 +35,14 @@ assert(studioMessageItem.includes("'cancel-image-task'"), 'Studio message action
 
 const studioMessageList = read('src/components/studio/StudioMessageList.vue')
 assert(studioMessageList.includes("'cancel-image-task': [message: StudioMessage]"), 'Studio message list must forward image task cancellation')
+
+const studioRequestView = read('src/views/studio/studioRequestView.ts')
+assert(studioRequestView.includes('input.imageForm.model'), 'Studio image tasks must send the selected catalog model')
+const modelCatalog = read('src/composables/useModelCatalog.ts')
+assert(modelCatalog.includes('image_models'), 'Studio catalog must expose image_models for the image model picker')
+const chartTheme = read('src/lib/chartTheme.ts')
+assert(chartTheme.includes("'gpt-image-2.5-flare'"), 'chart theme must color gpt-image-2.5-flare')
+assert(chartTheme.includes("'gpt-image-2.5-sunburst'"), 'chart theme must color gpt-image-2.5-sunburst')
 
 const studioView = read('src/views/Studio.vue')
 assert(studioView.includes('@cancel-image-task="cancelImageTask"'), 'Studio view must wire image task cancellation')

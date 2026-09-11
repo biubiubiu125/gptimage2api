@@ -7,10 +7,11 @@ from typing import Any, Mapping
 from uuid import UUID, uuid4
 
 from services.image_queue.settings import ImageQueueSettings
+from utils.helper import WEB_IMAGE_MODELS
 
 
 PUBLIC_IMAGE_MODEL = "gpt-image-2"
-PUBLIC_IMAGE_MODELS = {PUBLIC_IMAGE_MODEL}
+PUBLIC_IMAGE_MODELS = set(WEB_IMAGE_MODELS)
 PROMPT_SUFFIX_VERSION = "v1"
 IDEMPOTENCY_KEY_MAX_LENGTH = 200
 
@@ -121,6 +122,5 @@ def build_effective_prompt(prompt: str, settings: ImageQueueSettings) -> tuple[s
 def require_public_image_model(model: object) -> str:
     normalized = str(model or PUBLIC_IMAGE_MODEL).strip().lower() or PUBLIC_IMAGE_MODEL
     if normalized not in PUBLIC_IMAGE_MODELS:
-        message = f"unsupported image model; only {PUBLIC_IMAGE_MODEL} is available"
-        raise UnsupportedImageModel(message)
-    return PUBLIC_IMAGE_MODEL
+        raise UnsupportedImageModel("unsupported image model")
+    return normalized

@@ -903,6 +903,7 @@ class OpenAIBackendAPI:
             return "gpt-5-3"
         if base_model == CODEX_IMAGE_MODEL:
             return base_model
+        # gpt-image-2.5 / flare / sunburst use ChatGPT Web auto routing.
         return "auto"
 
     def _image_headers(self, path: str, requirements: ChatRequirements, conduit_token: str = "", accept: str = "*/*") -> \
