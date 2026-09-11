@@ -81,7 +81,7 @@ def _type_family(value) -> str:
         return "text"
     if "char" in name or "string" in name or "varchar" in name:
         return "string"
-    if "binary" in name or "blob" in name:
+    if "binary" in name or "blob" in name or "bytea" in name:
         return "binary"
     return name
 
