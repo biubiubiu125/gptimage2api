@@ -1488,6 +1488,7 @@ class OpenAIBackendAPI:
             "timezone_offset_min": CHROME146_TIMEZONE_OFFSET_MIN,
             "timezone": CHROME146_TIMEZONE,
             "conversation_mode": {"kind": "primary_assistant"},
+            "history_and_training_disabled": True,
             "enable_message_followups": True,
             "system_hints": ["picture_v2"],
             "supports_buffering": True,
