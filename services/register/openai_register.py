@@ -44,7 +44,6 @@ config = {
     },
     "proxy": "",
     "proxy_required": True,
-    "max_inflight_per_proxy": 0,
     "total": 10,
     "threads": 3,
 }

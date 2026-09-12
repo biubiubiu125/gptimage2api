@@ -159,18 +159,6 @@
         <p class="register-proxy-hint register-field--full">
           注册必须使用住宅代理，不能用默认出口或代理组。
         </p>
-
-        <label class="register-field">
-          <span class="register-label">每代理最大并发</span>
-          <Input
-            v-model.number="config.max_inflight_per_proxy"
-            type="number"
-            min="0"
-            block
-            placeholder="0 表示不限制"
-            :disabled="config.enabled"
-          />
-        </label>
       </div>
     </FormSection>
 

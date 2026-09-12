@@ -87,7 +87,6 @@ export const defaultRegisterConfig: LegacyRegisterConfig = {
   },
   proxy: '',
   proxy_required: true,
-  max_inflight_per_proxy: 0,
   total: 10,
   threads: 2,
   mode: 'available',
@@ -199,13 +198,14 @@ export function normalizeRegisterConfig(raw: LegacyRegisterConfig): LegacyRegist
   if (!mail.providers.length) {
     mail.providers = [defaultProvider('yyds_mail')]
   }
+  const rawConfig = { ...raw } as LegacyRegisterConfig & { max_inflight_per_proxy?: number }
+  delete rawConfig.max_inflight_per_proxy
   return {
     ...defaultRegisterConfig,
-    ...raw,
+    ...rawConfig,
     threads: Math.min(16, Math.max(1, Number(raw.threads) || defaultRegisterConfig.threads)),
     proxy: normalizeRegisterProxyValue(raw.proxy),
     proxy_required: true,
-    max_inflight_per_proxy: Math.max(0, Number(raw.max_inflight_per_proxy) || 0),
     mail,
     register_peak: {
       ...defaultRegisterConfig.register_peak,
@@ -378,7 +378,6 @@ export function legacyRegisterPayload(config: LegacyRegisterConfig): Partial<Leg
     },
     proxy: normalizeRegisterProxyValue(config.proxy),
     proxy_required: true,
-    max_inflight_per_proxy: Math.max(0, Number(config.max_inflight_per_proxy) || 0),
     total: Math.max(1, Number(config.total) || 1),
     threads: Math.min(16, Math.max(1, Number(config.threads) || 1)),
     mode: (config.mode || 'total') as RegisterMode,

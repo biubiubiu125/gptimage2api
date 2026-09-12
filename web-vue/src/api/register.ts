@@ -82,7 +82,6 @@ export type LegacyRegisterConfig = {
   }
   proxy: string
   proxy_required?: boolean
-  max_inflight_per_proxy?: number
   total: number
   threads: number
   mode: 'total' | 'quota' | 'available' | string

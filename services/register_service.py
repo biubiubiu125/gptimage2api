@@ -384,7 +384,7 @@ def _normalize(raw: dict, *, recover_invalid_windows: bool = False) -> dict:
         raise ValueError("registration windows must cover 24 hours without overlap")
     cfg["proxy"] = _normalize_register_proxy(cfg.get("proxy"))
     cfg["proxy_required"] = True
-    cfg["max_inflight_per_proxy"] = max(0, _safe_int(cfg.get("max_inflight_per_proxy"), 0))
+    cfg.pop("max_inflight_per_proxy", None)
     default_mail = _default_config()["mail"] if isinstance(_default_config().get("mail"), dict) else {}
     mail = cfg.get("mail") if isinstance(cfg.get("mail"), dict) else {}
     cfg["mail"] = {**default_mail, **mail}
@@ -447,13 +447,13 @@ class RegisterService:
         self._store = create_register_config_store(store_file)
         openai_register.register_log_sink = self._append_log
         self._config = self._load()
+        openai_register.config.pop("max_inflight_per_proxy", None)
         openai_register.config.update({
             key: self._config[key]
             for key in (
                 "mail",
                 "proxy",
                 "proxy_required",
-                "max_inflight_per_proxy",
                 "total",
                 "threads",
             )
@@ -472,6 +472,7 @@ class RegisterService:
         if (
             stored_proxy != str(normalized.get("proxy") or "").strip()
             or stored_mail.get("api_use_register_proxy") is True
+            or "max_inflight_per_proxy" in loaded
         ):
             self._config = normalized
             self._save_unlocked()
@@ -647,9 +648,6 @@ class RegisterService:
             requested = _bounded_int(window.threads, 1, minimum=1)
         else:
             requested = _bounded_int(cfg.get("threads"), 1, minimum=1)
-        proxy_limit = max(0, _safe_int(cfg.get("max_inflight_per_proxy"), 0))
-        if proxy_limit > 0 and str(cfg.get("proxy") or "").strip():
-            requested = min(requested, proxy_limit)
         return max(1, min(REGISTER_THREADS_MAX, max(1, _bounded_int(capacity, 1, minimum=1)), requested))
 
     def should_submit_registration(self) -> bool:
@@ -1004,7 +1002,8 @@ class RegisterService:
                 self._drop_mail_proxy()
                 if not (self._runner and self._runner.is_alive()) and not self._runtime_lease_active_locked():
                     self._config["stats"]["threads"] = self._config["threads"]
-                openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "proxy_required", "max_inflight_per_proxy", "total", "threads")})
+                openai_register.config.pop("max_inflight_per_proxy", None)
+                openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "proxy_required", "total", "threads")})
                 self._save_unlocked()
             return self.get()
 
@@ -1174,7 +1173,8 @@ class RegisterService:
                 with file_lock(self._lock_path()):
                     self._config = self._load_unlocked()
                     removed = self._prune_unused_outlook_pools()
-                    openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "proxy_required", "max_inflight_per_proxy", "total", "threads")})
+                    openai_register.config.pop("max_inflight_per_proxy", None)
+                    openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "proxy_required", "total", "threads")})
                     self._save_unlocked()
                     self._append_log(f"已清空 Outlook 邮箱池未使用邮箱，移除 {removed} 个", "yellow")
             return self.get()
@@ -1361,7 +1361,8 @@ class RegisterService:
                     "target_available": target_available,
                     "threads": active_threads,
                 }
-                openai_register.config.update({k: runtime_cfg[k] for k in ("mail", "proxy", "proxy_required", "max_inflight_per_proxy", "total", "threads")})
+                openai_register.config.pop("max_inflight_per_proxy", None)
+                openai_register.config.update({k: runtime_cfg[k] for k in ("mail", "proxy", "proxy_required", "total", "threads")})
                 self._bump(
                     threads=active_threads,
                     registration_window=window.name,

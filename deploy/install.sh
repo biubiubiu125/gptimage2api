@@ -101,7 +101,7 @@ print_step() {
   local title="$2"
   local hint="$3"
   ui_println ""
-  ui_println "----- $(text step_prefix) ${index}/7：${title} -----"
+  ui_println "----- $(text step_prefix) ${index}/6：${title} -----"
   ui_println "${hint}"
 }
 
@@ -131,8 +131,6 @@ text() {
       hint_port) printf 'Browser and API clients will use this host port.' ;;
       step_base_url) printf 'Image access URL' ;;
       hint_base_url) printf 'Prefix used in returned image URLs. Use a public domain or IP that clients can open, for example https://img.example.com.' ;;
-      step_thread_tokens) printf 'Backend sync concurrency' ;;
-      hint_thread_tokens) printf 'Thread tokens for backend sync work. Image generation uses a separate queue limit.' ;;
       step_dir) printf 'Install directory' ;;
       hint_dir) printf 'Compose files, .env, and config.json are written here.' ;;
       step_auth) printf 'Admin login key' ;;
@@ -140,7 +138,6 @@ text() {
       prompt_select) printf 'Select' ;;
       prompt_port) printf 'Web/API port' ;;
       prompt_base_url) printf 'Image access URL' ;;
-      prompt_thread_tokens) printf 'Backend sync concurrency (thread tokens)' ;;
       prompt_dir) printf 'Install directory' ;;
       prompt_auth) printf 'Admin login key' ;;
       prompt_auth_again) printf 'Type the admin login key again' ;;
@@ -155,7 +152,6 @@ text() {
       summary_mode) printf 'Run mode' ;;
       summary_port) printf 'Port' ;;
       summary_base_url) printf 'Image URL' ;;
-      summary_tokens) printf 'Concurrency' ;;
       summary_dir) printf 'Directory' ;;
       summary_database) printf 'Database' ;;
       summary_git) printf 'Source' ;;
@@ -218,8 +214,6 @@ text() {
     hint_port) printf '浏览器打开控制台、调用 API 都走这个端口。' ;;
     step_base_url) printf '图片访问地址' ;;
     hint_base_url) printf '用来生成图片结果的访问前缀。外网调用请填客户端能打开的域名或 IP，例如 https://img.example.com。' ;;
-    step_thread_tokens) printf '后端同步并发' ;;
-    hint_thread_tokens) printf '这是后端同步工作的线程令牌，不是图片队列并发。一般保持默认即可。' ;;
     step_dir) printf '安装目录' ;;
     hint_dir) printf 'Compose、.env 和 config.json 会写到这里。' ;;
     step_auth) printf '管理员登录密钥' ;;
@@ -227,7 +221,6 @@ text() {
     prompt_select) printf '请选择' ;;
     prompt_port) printf 'Web/API 端口' ;;
     prompt_base_url) printf '图片访问地址' ;;
-    prompt_thread_tokens) printf '后端同步并发容量（线程令牌）' ;;
     prompt_dir) printf '安装目录' ;;
     prompt_auth) printf '管理员登录密钥' ;;
     prompt_auth_again) printf '请再输入一次管理员登录密钥' ;;
@@ -242,7 +235,6 @@ text() {
     summary_mode) printf '运行方式' ;;
     summary_port) printf '端口' ;;
     summary_base_url) printf '图片访问地址' ;;
-    summary_tokens) printf '并发' ;;
     summary_dir) printf '安装目录' ;;
     summary_database) printf '数据库' ;;
     summary_git) printf '代码来源' ;;
@@ -587,7 +579,6 @@ print_summary() {
   ui_println "  $(text summary_mode): $(mode_label "${MODE}")"
   ui_println "  $(text summary_port): ${PORT}"
   ui_println "  $(text summary_base_url): ${BASE_URL}"
-  ui_println "  $(text summary_tokens): ${THREAD_TOKENS}"
   ui_println "  $(text summary_dir): ${INSTALL_DIR}"
   ui_println "  $(text summary_database): $(text label_database)"
   ui_println "  $(text summary_git): $(text label_branch)"
@@ -852,23 +843,14 @@ main() {
     fi
     ui_println "[$(text prefix_error)] $(text err_port)"
   done
-  print_step "4" "$(text step_thread_tokens)" "$(text hint_thread_tokens)"
-  while true; do
-    THREAD_TOKENS="$(prompt_input "$(text prompt_thread_tokens)" "${THREAD_TOKENS}" "0")"
-    if [[ -n "${THREAD_TOKENS}" && "${THREAD_TOKENS}" =~ ^[0-9]+$ && "${THREAD_TOKENS}" -ge 1 ]]; then
-      echo_selected "${THREAD_TOKENS}"
-      break
-    fi
-    ui_println "[$(text prefix_error)] $(text err_thread_tokens)"
-  done
-  print_step "5" "$(text step_dir)" "$(text hint_dir)"
+  print_step "4" "$(text step_dir)" "$(text hint_dir)"
   INSTALL_DIR="$(prompt_input "$(text prompt_dir)" "${INSTALL_DIR}")"
   configure_database
 
   if [[ -z "${BASE_URL}" ]]; then
     BASE_URL="http://localhost:${PORT}"
   fi
-  print_step "6" "$(text step_base_url)" "$(text hint_base_url)"
+  print_step "5" "$(text step_base_url)" "$(text hint_base_url)"
   while true; do
     BASE_URL="$(normalize_base_url "$(prompt_input "$(text prompt_base_url)" "${BASE_URL}" "0")")"
     if is_valid_base_url "${BASE_URL}"; then
@@ -878,7 +860,7 @@ main() {
     ui_println "[$(text prefix_error)] $(text err_base_url)"
   done
 
-  print_step "7" "$(text step_auth)" "$(text hint_auth)"
+  print_step "6" "$(text step_auth)" "$(text hint_auth)"
   if [[ -z "${AUTH_KEY}" || "${AUTH_KEY}" == "your_secret_key_here" ]]; then
     AUTH_KEY="$(prompt_secret_confirmed)"
   else

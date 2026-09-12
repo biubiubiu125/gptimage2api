@@ -54,7 +54,7 @@ curl http://localhost:2080/health
 - 控制台：`http://localhost:2080`
 - API：`http://localhost:2080/v1`
 
-一键安装向导固定使用 PostgreSQL 18 本地容器，不再询问 SQLite 或外部数据库 URL，也不再询问 Git 分支。直接回车使用默认值，并立刻打印已选项。向导会询问图片访问地址并写入 `GPTIMAGE2API_BASE_URL`，默认 `http://localhost:<端口>`；外网请改成客户端能打开的域名或 IP。管理员登录密钥必须手工输入两次，输入过程隐藏。摘要确认后才开始拉镜像或克隆。Docker 模式启动应用与 PostgreSQL；Python 源码模式仍会启动 PostgreSQL 容器，并把 `127.0.0.1:5432` 映射到宿主机，不对外网开放。若安装目录已是旧 Git 仓库且无法快进到新的 `main`，需要备份后删除该目录再装。重复运行会复用已有 `POSTGRES_PASSWORD`。`GPTIMAGE2API_THREAD_TOKENS` 默认是 `120`，表示后端同步工作线程的并发容量；图片任务另由 `GPTIMAGE2API_IMAGE_QUEUE_GENERATION_CONCURRENCY` 控制。
+一键安装向导固定使用 PostgreSQL 18 本地容器，不再询问 SQLite 或外部数据库 URL，也不再询问 Git 分支。直接回车使用默认值，并立刻打印已选项。向导会询问图片访问地址并写入 `GPTIMAGE2API_BASE_URL`，默认 `http://localhost:<端口>`；外网请改成客户端能打开的域名或 IP。管理员登录密钥必须手工输入两次，输入过程隐藏。摘要确认后才开始拉镜像或克隆。Docker 模式启动应用与 PostgreSQL；Python 源码模式仍会启动 PostgreSQL 容器，并把 `127.0.0.1:5432` 映射到宿主机，不对外网开放。若安装目录已是旧 Git 仓库且无法快进到新的 `main`，需要备份后删除该目录再装。重复运行会复用已有 `POSTGRES_PASSWORD`。向导不再询问后端同步并发容量，默认写入 `GPTIMAGE2API_THREAD_TOKENS=120`；图片任务另由 `GPTIMAGE2API_IMAGE_QUEUE_GENERATION_CONCURRENCY` 控制。
 
 ## 本地开发
 

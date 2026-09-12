@@ -6,7 +6,7 @@ import json
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 
 from api.support import require_admin
@@ -53,7 +53,6 @@ class RegisterConfigRequest(BaseModel):
     mail: dict | None = None
     proxy: str | None = None
     proxy_required: bool | None = None
-    max_inflight_per_proxy: int | None = Field(default=None, ge=0)
     total: int | None = None
     threads: int | None = None
     mode: str | None = None
