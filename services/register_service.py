@@ -352,6 +352,14 @@ def _window_minutes(time_range: str) -> set[int]:
     return set(range(start, 24 * 60)) | set(range(0, end))
 
 
+def _is_register_proxy_url(value: object) -> bool:
+    return openai_register.is_register_proxy_url(value)
+
+
+def _normalize_register_proxy(value: object) -> str:
+    return openai_register.normalize_register_proxy(value)
+
+
 def _normalize(raw: dict, *, recover_invalid_windows: bool = False) -> dict:
     cfg = _default_config()
     cfg.update({k: v for k, v in raw.items() if k not in {"stats", "logs"}})
@@ -374,14 +382,14 @@ def _normalize(raw: dict, *, recover_invalid_windows: bool = False) -> dict:
     offpeak_minutes = _window_minutes(str(cfg["register_offpeak"]["time_range"]))
     if peak_minutes & offpeak_minutes or len(peak_minutes | offpeak_minutes) != 24 * 60:
         raise ValueError("registration windows must cover 24 hours without overlap")
-    cfg["proxy"] = str(cfg.get("proxy") or "").strip()
-    cfg["proxy_required"] = _safe_bool(cfg.get("proxy_required"), False)
+    cfg["proxy"] = _normalize_register_proxy(cfg.get("proxy"))
+    cfg["proxy_required"] = True
     cfg["max_inflight_per_proxy"] = max(0, _safe_int(cfg.get("max_inflight_per_proxy"), 0))
     default_mail = _default_config()["mail"] if isinstance(_default_config().get("mail"), dict) else {}
     mail = cfg.get("mail") if isinstance(cfg.get("mail"), dict) else {}
     cfg["mail"] = {**default_mail, **mail}
     cfg["mail"]["providers"] = validate_provider_entries(cfg["mail"].get("providers"))
-    cfg["mail"]["api_use_register_proxy"] = _safe_bool(cfg["mail"].get("api_use_register_proxy"), True)
+    cfg["mail"]["api_use_register_proxy"] = False
     _ensure_provider_ids_unique(cfg["mail"].get("providers"), assign_missing=False)
     try:
         wait_timeout = float(cfg["mail"].get("wait_timeout") or 30)
@@ -455,7 +463,19 @@ class RegisterService:
         return self._store_file.with_name(f"{self._store_file.name}.lock")
 
     def _load_unlocked(self) -> dict:
-        return _normalize(self._store.load(), recover_invalid_windows=True)
+        loaded = self._store.load()
+        if not isinstance(loaded, dict):
+            loaded = {}
+        normalized = _normalize(loaded, recover_invalid_windows=True)
+        stored_proxy = str(loaded.get("proxy") or "").strip()
+        stored_mail = loaded.get("mail") if isinstance(loaded.get("mail"), dict) else {}
+        if (
+            stored_proxy != str(normalized.get("proxy") or "").strip()
+            or stored_mail.get("api_use_register_proxy") is True
+        ):
+            self._config = normalized
+            self._save_unlocked()
+        return normalized
 
     def _save_unlocked(self) -> None:
         self._store.save(self._config)
@@ -635,9 +655,8 @@ class RegisterService:
     def should_submit_registration(self) -> bool:
         with self._lock:
             self._reload_locked()
-            proxy_required = bool(self._config.get("proxy_required"))
             proxy = str(self._config.get("proxy") or "").strip()
-        if proxy_required and not proxy:
+        if not _is_register_proxy_url(proxy):
             self._bump(pause_reason="proxy_required")
             return False
         if not self._integrations_ready():
@@ -739,11 +758,20 @@ class RegisterService:
         runner_alive = bool(self._runner and self._runner.is_alive())
         if runner_alive and self._shutdown_event.is_set():
             return "stopping"
+        if not runner_alive and self._runtime_lease_active_locked():
+            runtime = self._config.get("runtime") if isinstance(self._config.get("runtime"), dict) else {}
+            if str(runtime.get("state") or "") == "stopping":
+                return "stopping"
+        if not _is_register_proxy_url(self._config.get("proxy")) and (
+            runner_alive
+            or bool(self._config.get("enabled"))
+            or self._runtime_lease_active_locked()
+        ):
+            return "paused"
         if runner_alive:
             return "running"
         if self._runtime_lease_active_locked():
-            runtime = self._config.get("runtime") if isinstance(self._config.get("runtime"), dict) else {}
-            return "stopping" if str(runtime.get("state") or "") == "stopping" else "running"
+            return "running"
         if bool(self._config.get("enabled")) and not self._integrations_ready():
             return "paused"
         if bool(self._config.get("enabled")) and str(self._config.get("stats", {}).get("pause_reason") or ""):
@@ -989,6 +1017,11 @@ class RegisterService:
                 if self._runner and self._runner.is_alive():
                     if not self._shutdown_event.is_set():
                         self._config["enabled"] = True
+                        if not _is_register_proxy_url(self._config.get("proxy")):
+                            self._config["stats"].update({
+                                "pause_reason": "proxy_required",
+                                "updated_at": _now(),
+                            })
                         self._save_unlocked()
                 elif (
                     self._runtime_lease_active_locked()
@@ -1002,7 +1035,7 @@ class RegisterService:
                     self._config["enabled"] = True
                     self._shutdown_event.clear()
                     self._drop_mail_proxy()
-                    if bool(self._config.get("proxy_required")) and not str(self._config.get("proxy") or "").strip():
+                    if not _is_register_proxy_url(self._config.get("proxy")):
                         self._config["stats"].update({
                             "pause_reason": "proxy_required",
                             "updated_at": _now(),
@@ -1156,14 +1189,6 @@ class RegisterService:
                 "yellow",
             )
         return self.get()
-
-    def _mail_config_with_proxy(self) -> dict:
-        self._reload_locked()
-        mail = json.loads(json.dumps(self._config.get("mail") if isinstance(self._config.get("mail"), dict) else {}, ensure_ascii=False))
-        use_register_proxy = _safe_bool(mail.get("api_use_register_proxy"), True)
-        mail["api_use_register_proxy"] = use_register_proxy
-        mail["proxy"] = str(self._config.get("proxy") or "").strip() if use_register_proxy else ""
-        return mail
 
     def _append_log(self, text: str, color: str = "") -> None:
         with self._lock:
@@ -1342,7 +1367,6 @@ class RegisterService:
                     registration_window=window.name,
                     registration_time_range=window.time_range,
                     target_available=target_available,
-                    pause_reason="",
                 )
                 target_reached = False
                 while (

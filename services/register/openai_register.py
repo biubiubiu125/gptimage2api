@@ -27,7 +27,7 @@ from services.browser_fingerprint import (
     chrome146_headers,
 )
 from services.config import DATA_DIR
-from services.proxy_service import ClearanceBundle, proxy_settings
+from services.proxy_service import ClearanceBundle, normalize_proxy_url, proxy_settings
 from services.register import mail_provider
 from services.register.log_redaction import redact_register_log_text
 from services.register.recovery_crypto import read_secure_json_file, write_secure_json_file
@@ -39,11 +39,11 @@ config = {
         "request_timeout": 30,
         "wait_timeout": 30,
         "wait_interval": 2,
-        "api_use_register_proxy": True,
+        "api_use_register_proxy": False,
         "providers": [],
     },
     "proxy": "",
-    "proxy_required": False,
+    "proxy_required": True,
     "max_inflight_per_proxy": 0,
     "total": 10,
     "threads": 3,
@@ -59,6 +59,8 @@ platform_oauth_audience = "https://api.openai.com/v1"
 platform_auth0_client = "eyJuYW1lIjoiYXV0aDAtc3BhLWpzIiwidmVyc2lvbiI6IjEuMjEuMCJ9"
 AUTH_NAVIGATION_HOSTS = frozenset({"auth.openai.com", "chatgpt.com", "platform.openai.com"})
 AUTH_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+REGISTER_PROXY_SCHEMES = frozenset({"http", "https", "socks5", "socks5h"})
+REGISTER_PROXY_REFERENCES = frozenset({"", "direct", "global"})
 REGISTER_BROWSER_PROFILES: tuple[dict[str, str], ...] = (
     {
         "impersonate": CHROME146_IMPERSONATE,
@@ -76,6 +78,24 @@ def _chrome_user_agent(_major: str = "", _full_version: str = "") -> str:
 
 def _chrome_sec_ch_ua(_major: str = "") -> str:
     return CHROME146_SEC_CH_UA
+
+
+def is_register_proxy_url(value: object) -> bool:
+    raw = str(value or "").strip()
+    lower = raw.lower()
+    if not raw or lower in REGISTER_PROXY_REFERENCES or lower.startswith(("group:", "profile:")):
+        return False
+    if "***" in raw:
+        return False
+    parsed = urlparse(normalize_proxy_url(raw))
+    return parsed.scheme in REGISTER_PROXY_SCHEMES and bool(parsed.netloc)
+
+
+def normalize_register_proxy(value: object) -> str:
+    raw = str(value or "").strip()
+    if not is_register_proxy_url(raw):
+        return ""
+    return normalize_proxy_url(raw)
 
 
 def _chrome_sec_ch_ua_full_version_list(_major: str = "", _full_version: str = "") -> str:
@@ -446,26 +466,10 @@ def _is_cloudflare_challenge(resp) -> bool:
     )
 
 
-def _truthy(value: object, fallback: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if value is None:
-        return fallback
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "y", "on", "enabled"}:
-        return True
-    if text in {"0", "false", "no", "n", "off", "disabled", "none", "null", ""}:
-        return False
-    return fallback
-
-
 def _mail_config(register_proxy: str = "") -> dict:
+    del register_proxy
     mail = config["mail"] if isinstance(config.get("mail"), dict) else {}
-    use_register_proxy = _truthy(mail.get("api_use_register_proxy"), True)
-    proxy = str(register_proxy or "").strip() if use_register_proxy else ""
-    return {**mail, "api_use_register_proxy": use_register_proxy, "proxy": proxy}
+    return {**mail, "api_use_register_proxy": False, "proxy": "direct"}
 
 
 def _authorize_landed_page(resp) -> str:
@@ -522,6 +526,9 @@ def build_sentinel_token(
 
 
 def create_session(proxy: str = "", fingerprint: dict[str, str] | None = None) -> Any:
+    proxy = str(proxy or "").strip()
+    if not is_register_proxy_url(proxy):
+        raise RuntimeError("registration requires a residential proxy URL")
     fp = _browser_fingerprint(fingerprint)
     kwargs = proxy_settings.build_session_kwargs(
         proxy=proxy,
@@ -1746,7 +1753,7 @@ def worker(index: int) -> dict:
 
             handoff = reconcile_core_result(
                 result,
-                register_proxy=config.get("proxy", ""),
+                register_proxy=registrar.proxy,
                 verify_fn=verify_registered_account,
                 account_service_obj=account_service,
             )
@@ -1789,12 +1796,13 @@ def worker(index: int) -> dict:
 
 
 def verify_registered_account(access_token: str, register_proxy: str = "") -> dict[str, Any]:
+    del register_proxy
     token = str(access_token or "").strip()
     if not token:
         raise RuntimeError("registered account token is empty")
     from services.openai_backend_api import OpenAIBackendAPI
 
-    with OpenAIBackendAPI(token, proxy=register_proxy) as backend:
+    with OpenAIBackendAPI(token) as backend:
         remote_info = backend.get_user_info()
     if not isinstance(remote_info, dict):
         raise RuntimeError("registered account verification returned invalid payload")

@@ -1,6 +1,12 @@
 <template>
-  <div class="register-page">
-    <PagePanel class="space-y-4">
+  <div
+    class="register-page"
+    :class="{ 'lg:flex lg:min-h-0 lg:flex-1 lg:flex-col': isWorkspaceLayout }"
+  >
+    <PagePanel
+      class="space-y-4"
+      :class="{ 'min-h-0 flex-1 overflow-y-auto': isWorkspaceLayout }"
+    >
       <PanelHeader title="注册账号" align="start">
         <template #actions>
           <StateBadge :tone="registerStateTone" shape="rounded" size="sm">
@@ -27,13 +33,7 @@
         <div class="register-config-column">
           <RegisterTaskSettingsPanel
             :config="registerConfig"
-            :proxy-mode="registerProxyMode"
-            :selected-proxy-group-id="selectedRegisterProxyGroupId"
             :custom-proxy-input="customRegisterProxyInput"
-            :proxy-group-groups="registerProxyGroupGroups"
-            :proxy-hint="registerProxyHint"
-            @update-proxy-mode="setRegisterProxyMode"
-            @select-proxy-group="selectRegisterProxyGroup"
             @update-custom-proxy="setCustomRegisterProxyInput"
           />
 
@@ -99,6 +99,7 @@ import PagePanel from '@/components/ai/PagePanel.vue'
 import PanelHeader from '@/components/ai/PanelHeader.vue'
 import StateBadge from '@/components/ai/StateBadge.vue'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
+import { useListLayoutPreference } from '@/composables/useListLayoutPreference'
 import { usePageRuntime } from '@/composables/usePageRuntime'
 import { useToast } from '@/composables/useToast'
 import RegisterProviderCard from '@/views/register/RegisterProviderCard.vue'
@@ -127,6 +128,7 @@ defineOptions({ name: 'Register' })
 const toast = useToast()
 const confirmDialog = useConfirmDialog()
 const pageRuntime = usePageRuntime('register')
+const { isWorkspaceLayout } = useListLayoutPreference()
 
 const registerConfigRuntime = useRegisterConfigRuntime({
   runtime: pageRuntime,
@@ -139,20 +141,13 @@ const legacyLoading = registerConfigRuntime.loading
 const legacySaving = registerConfigRuntime.saving
 const registerConfig = registerConfigRuntime.config
 const registerProviders = registerConfigRuntime.providers
-const registerProxyMode = registerConfigRuntime.proxyMode
-const selectedRegisterProxyGroupId = registerConfigRuntime.selectedProxyGroupId
 const customRegisterProxyInput = registerConfigRuntime.customProxyInput
-const registerProxyGroupGroups = registerConfigRuntime.proxyGroupGroups
-const registerProxyHint = registerConfigRuntime.proxyHint
 const applyRegisterConfig = registerConfigRuntime.applyConfig
 const applyRemoteRegisterConfig = registerConfigRuntime.applyRemoteConfig
 const loadRegisterConfig = registerConfigRuntime.loadConfig
-const loadProxyGroups = registerConfigRuntime.loadProxyGroups
 const saveLegacyConfig = registerConfigRuntime.saveConfig
 const toggleLegacyTask = registerConfigRuntime.toggleTask
 const resetLegacyStats = registerConfigRuntime.resetStats
-const setRegisterProxyMode = registerConfigRuntime.setProxyMode
-const selectRegisterProxyGroup = registerConfigRuntime.selectProxyGroup
 const setCustomRegisterProxyInput = registerConfigRuntime.setCustomProxyInput
 const outlookPoolRuntime = useRegisterOutlookPoolRuntime({
   saving: legacySaving,
@@ -209,7 +204,7 @@ const updateProviderArray = providerRuntime.updateProviderArray
 
 function activateRegisterView(refresh = false) {
   if (refresh) {
-    void Promise.all([loadRegisterConfig(true), loadProxyGroups()])
+    void loadRegisterConfig(true)
   }
   startLiveUpdates()
 }
@@ -222,7 +217,7 @@ function deactivateRegisterView() {
 pageRuntime.onActivate(({ initial }) => {
   if (initial) {
     void (async () => {
-      await Promise.all([loadRegisterConfig(), loadProxyGroups()])
+      await loadRegisterConfig()
       startLiveUpdates()
     })()
     return

@@ -4335,6 +4335,7 @@ class AccountService:
         image_scope: bool = False,
         allow_refresh_token_exchange: bool = True,
         preflight_refresh: bool = True,
+        proxy: str = "",
     ) -> dict[str, Any] | None:
         if not access_token:
             raise ValueError("access_token is required")
@@ -4350,7 +4351,7 @@ class AccountService:
 
         def request_user_info(token: str) -> dict[str, Any]:
             with account_processing_slot():
-                with OpenAIBackendAPI(token) as backend:
+                with OpenAIBackendAPI(token, proxy=proxy) as backend:
                     return backend.get_user_info()
 
         request_token, request_refresh_token, request_account = self._credential_snapshot(active_token)
@@ -4976,6 +4977,7 @@ class AccountService:
         remove_invalid: bool | None = None,
         *,
         finalize_progress: bool = True,
+        proxy: str = "",
     ) -> dict[str, Any]:
         """Synchronize remote account metadata and image quota."""
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
@@ -5006,6 +5008,7 @@ class AccountService:
                     "sync_accounts_and_quota",
                     remove_invalid,
                     preflight_refresh=False,
+                    proxy=proxy,
                 )
                 futures[future] = (token, account_id, account_label)
             for future in as_completed(futures):
@@ -5083,6 +5086,7 @@ class AccountService:
         remove_invalid: bool | None = None,
         *,
         finalize_progress: bool = True,
+        proxy: str = "",
     ) -> dict[str, Any]:
         """Compatibility alias for synchronize-account-and-quota callers."""
         result = self.sync_accounts_and_quota(
@@ -5090,6 +5094,7 @@ class AccountService:
             progress_id,
             remove_invalid,
             finalize_progress=finalize_progress,
+            proxy=proxy,
         )
         return {**result, "refreshed": int(result.get("synced") or 0)}
 

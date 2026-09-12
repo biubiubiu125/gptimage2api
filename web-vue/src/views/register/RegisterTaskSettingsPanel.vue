@@ -144,51 +144,21 @@
           />
         </label>
 
-        <label class="register-field">
+        <label class="register-field register-field--full">
           <span class="register-label">注册代理</span>
-          <GroupedSelectMenu
-            :model-value="proxyMode"
-            :groups="registerProxyModeGroups"
-            selected-indicator="none"
-            :disabled="config.enabled"
-            block
-            @update:model-value="emit('update-proxy-mode', $event)"
-          />
-        </label>
-
-        <label v-if="proxyMode === 'group'" class="register-field">
-          <span class="register-label">代理组</span>
-          <GroupedSelectMenu
-            :model-value="selectedProxyGroupId"
-            :groups="proxyGroupGroups"
-            selected-indicator="none"
-            :disabled="config.enabled"
-            block
-            @update:model-value="emit('select-proxy-group', $event)"
-          />
-        </label>
-
-        <label v-else-if="proxyMode === 'custom'" class="register-field">
-          <span class="register-label">自定义代理</span>
           <Input
             :model-value="customProxyInput"
             block
             root-class="font-mono"
-            placeholder="http://127.0.0.1:7890"
+            placeholder="socks5://user:pass@host:port"
             :disabled="config.enabled"
             @update:model-value="emit('update-custom-proxy', $event)"
           />
         </label>
 
         <p class="register-proxy-hint register-field--full">
-          {{ proxyHint }}
+          注册必须使用住宅代理，不能用默认出口或代理组。
         </p>
-
-        <label class="register-checkbox-field">
-          <Checkbox v-model="config.proxy_required" :disabled="config.enabled">
-            必须使用注册代理
-          </Checkbox>
-        </label>
 
         <label class="register-field">
           <span class="register-label">每代理最大并发</span>
@@ -263,22 +233,14 @@ import type { LegacyRegisterConfig } from '@/api/register'
 import {
   providerMailUserAgentChrome146,
   registerModeGroups,
-  registerProxyModeGroups,
-  type RegisterProxyMode,
 } from '@/views/register/registerProviderView'
 
 defineProps<{
   config: LegacyRegisterConfig
-  proxyMode: RegisterProxyMode
-  selectedProxyGroupId: string
   customProxyInput: string
-  proxyGroupGroups: unknown[]
-  proxyHint: string
 }>()
 
 const emit = defineEmits<{
-  (e: 'update-proxy-mode', value: string): void
-  (e: 'select-proxy-group', value: string): void
   (e: 'update-custom-proxy', value: string): void
 }>()
 </script>

@@ -58,6 +58,9 @@ assert(registerLiveRuntime.includes("line.startsWith('event:')"), 'register SSE 
 const appShell = read('src/layouts/AppShell.vue')
 assert(appShell.includes('/register'), 'sidebar must link to /register')
 assert(appShell.includes('GPTImage2API'), 'shell must use GPTImage2API branding')
+assert(appShell.includes("label: '注册账号'"), 'sidebar must label register as 注册账号')
+assert(!appShell.includes("label: '注册机'"), 'sidebar must not keep 注册机 label')
+assert(appShell.includes("register: '注册账号'"), 'page title map must use 注册账号')
 
 const providerView = read('src/views/register/registerProviderView.ts')
 const providerValues = [...providerView.matchAll(/value: '([^']+)'/g)].map(match => match[1])
@@ -66,8 +69,29 @@ for (const provider of allowed) {
   assert(providerValues.includes(provider), `provider selector missing ${provider}`)
 }
 const unexpectedProviders = providerValues.filter(provider => !allowed.includes(provider)
-  && !['total', 'quota', 'available', 'global', 'direct', 'group', 'custom', 'code', 'purchase', 'private_first', 'public_only', 'graph', 'imap', 'auto'].includes(provider))
+  && !['total', 'quota', 'available', 'code', 'purchase', 'private_first', 'public_only', 'graph', 'imap', 'auto'].includes(provider))
 assert(unexpectedProviders.length === 0, `unexpected provider options: ${unexpectedProviders.join(', ')}`)
+assert(providerView.includes('住宅代理'), 'register proxy hint must require residential proxies')
+assert(providerView.includes('proxy_required: true'), 'register config must always require a proxy')
+assert(!providerView.includes("label: '使用默认代理'"), 'register proxy must not offer default proxy mode')
+assert(providerView.includes('function isRegisterProxyUrl'), 'register proxy must validate custom residential URLs')
+assert(providerView.includes("'global'"), 'register proxy validator must reject global default egress')
+assert(providerView.includes("'socks'"), 'register proxy validator must accept socks:// URLs')
+assert(providerView.includes('socks5h'), 'register proxy validator must accept socks5h URLs')
+assert(providerView.includes('api_use_register_proxy: false'), 'register payload must keep mailbox traffic off the register proxy')
+
+const registerView = read('src/views/Register.vue')
+assert(registerView.includes('isWorkspaceLayout'), 'register page must join workspace contained layout')
+assert(registerView.includes('overflow-y-auto'), 'register page must scroll inside the workspace')
+
+const registerTaskPanel = read('src/views/register/RegisterTaskSettingsPanel.vue')
+assert(registerTaskPanel.includes('住宅代理'), 'register task settings must say residential proxy is required')
+assert(!registerTaskPanel.includes('使用默认代理'), 'register task settings must not offer default proxy')
+assert(!registerTaskPanel.includes('必须使用注册代理'), 'register task settings must not expose optional proxy_required')
+assert(!registerTaskPanel.includes('registerProxyModeGroups'), 'register task settings must not expose proxy mode select')
+
+const settingsView = read('src/views/settings/settingsView.ts')
+assert(settingsView.includes("register: '注册账号状态'"), 'backup include label must use 注册账号状态')
 
 const filesToScan = [
   'src/api/register.ts',

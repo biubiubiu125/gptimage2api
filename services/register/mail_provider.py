@@ -503,9 +503,8 @@ def _normalize_string_list(value: Any) -> list[str]:
 
 
 def _create_session(conf: dict):
-    proxy = str(conf.get("proxy") or "").strip()
     kwargs = proxy_settings.build_session_kwargs(
-        proxy=proxy,
+        proxy="direct",
         upstream=True,
         impersonate=CHROME146_IMPERSONATE,
         verify=not proxy_settings.should_skip_ssl_verify(),
@@ -945,9 +944,8 @@ def _icloud_validate_response_url(value: object, api_base: str, *, field_name: s
 
 
 def _icloud_mailbox_session(mailbox: dict[str, Any]) -> requests.Session:
-    proxy = str(mailbox.get("_icloud_proxy") or "").strip()
     kwargs = proxy_settings.build_session_kwargs(
-        proxy=proxy,
+        proxy="direct",
         upstream=True,
         impersonate=CHROME146_IMPERSONATE,
         verify=not proxy_settings.should_skip_ssl_verify(),
@@ -1145,7 +1143,7 @@ class ICloudApiProvider(BaseMailProvider):
         self.purpose = ICLOUD_API_DEFAULT_PURPOSE
         self.keyword = ICLOUD_API_DEFAULT_KEYWORD
         kwargs = proxy_settings.build_session_kwargs(
-            proxy=str(conf.get("proxy") or "").strip(),
+            proxy="direct",
             upstream=True,
             impersonate=CHROME146_IMPERSONATE,
             verify=not proxy_settings.should_skip_ssl_verify(),

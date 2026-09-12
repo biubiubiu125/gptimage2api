@@ -1,18 +1,12 @@
 import { computed, ref, watch } from 'vue'
 import { getAuthToken } from '@/api/client'
-import { proxyApi, type ProxyGroup } from '@/api/proxy'
 import { registerApi, type LegacyRegisterConfig } from '@/api/register'
 import { usePageQuery } from '@/composables/usePageQuery'
 import type { PageRuntime } from '@/composables/usePageRuntime'
 import {
   legacyRegisterPayload,
   normalizeRegisterConfig,
-  normalizeRegisterProxyMode,
-  registerProxyControlFromValue,
-  registerProxyGroupOptions as buildRegisterProxyGroupOptions,
-  registerProxyHint as buildRegisterProxyHint,
-  registerProxyValueFromControl,
-  type RegisterProxyMode,
+  normalizeRegisterProxyValue,
 } from '@/views/register/registerProviderView'
 
 type ConfirmOptions = {
@@ -31,14 +25,10 @@ export type RegisterConfigRuntimeInput = {
 }
 
 const REGISTER_CONFIG_REQUEST_KEY = 'register:config'
-const PROXY_GROUPS_REQUEST_KEY = 'register:proxy-groups'
 
 export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
   const loading = ref(false)
   const saving = ref(false)
-  const proxyGroups = ref<ProxyGroup[]>([])
-  const proxyMode = ref<RegisterProxyMode>('global')
-  const selectedProxyGroupId = ref('')
   const customProxyInput = ref('')
   const config = ref<LegacyRegisterConfig | null>(null)
   const isConfigDirty = ref(false)
@@ -51,15 +41,8 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
     loading,
     errorMessage: '加载注册配置失败',
   })
-  const proxyGroupsQuery = usePageQuery({
-    runtime: input.runtime,
-    key: PROXY_GROUPS_REQUEST_KEY,
-  })
 
   const providers = computed(() => config.value?.mail.providers || [])
-  const proxyGroupOptions = computed(() => buildRegisterProxyGroupOptions(proxyGroups.value, selectedProxyGroupId.value))
-  const proxyGroupGroups = computed(() => [{ options: proxyGroupOptions.value }])
-  const proxyHint = computed(() => buildRegisterProxyHint(proxyMode.value))
 
   function onConfigApplied(callback: () => void) {
     applyListeners.add(callback)
@@ -67,10 +50,7 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
   }
 
   function syncProxyControlsFromValue(value: unknown) {
-    const controls = registerProxyControlFromValue(value)
-    proxyMode.value = controls.mode
-    selectedProxyGroupId.value = controls.groupId
-    customProxyInput.value = controls.customProxy
+    customProxyInput.value = normalizeRegisterProxyValue(value)
   }
 
   function configSignature(value: LegacyRegisterConfig | null) {
@@ -107,25 +87,11 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
     isConfigDirty.value = Boolean(signature && signature !== lastAppliedConfigSignature.value)
   }, { deep: true })
 
-  function setProxyMode(mode: string) {
-    proxyMode.value = normalizeRegisterProxyMode(mode)
-    if (!config.value) return
-    config.value.proxy = registerProxyValueFromControl(proxyMode.value, selectedProxyGroupId.value, customProxyInput.value)
-  }
-
-  function selectProxyGroup(groupId: string) {
-    selectedProxyGroupId.value = String(groupId || '').trim()
-    proxyMode.value = 'group'
-    if (config.value) {
-      config.value.proxy = registerProxyValueFromControl(proxyMode.value, selectedProxyGroupId.value, customProxyInput.value)
-    }
-  }
-
   function setCustomProxyInput(value: string) {
     customProxyInput.value = String(value || '').trim()
-    proxyMode.value = 'custom'
     if (config.value) {
-      config.value.proxy = registerProxyValueFromControl(proxyMode.value, selectedProxyGroupId.value, customProxyInput.value)
+      config.value.proxy = normalizeRegisterProxyValue(customProxyInput.value)
+      config.value.proxy_required = true
     }
   }
 
@@ -133,6 +99,8 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
     if (!config.value) return {}
     return legacyRegisterPayload({
       ...config.value,
+      proxy: normalizeRegisterProxyValue(customProxyInput.value || config.value.proxy),
+      proxy_required: true,
       mail: {
         ...config.value.mail,
         providers: providers.value,
@@ -152,22 +120,6 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
           if (!silent) input.notifyError(message)
         },
         silentLoading: silent,
-      },
-    )
-  }
-
-  async function loadProxyGroups() {
-    await proxyGroupsQuery.run(
-      () => proxyApi.listGroups(),
-      {
-        apply: (response) => {
-          proxyGroups.value = Array.isArray(response.groups)
-            ? response.groups.filter((group) => String(group?.id || '').trim())
-            : []
-        },
-        onError: () => {
-          proxyGroups.value = []
-        },
       },
     )
   }
@@ -242,7 +194,6 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
 
   function invalidate() {
     configQuery.invalidate()
-    proxyGroupsQuery.invalidate()
   }
 
   function isTaskEnabled() {
@@ -253,25 +204,16 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
     authToken: getAuthToken,
     loading,
     saving,
-    proxyGroups,
-    proxyMode,
-    selectedProxyGroupId,
     customProxyInput,
     config,
     isConfigDirty,
     providers,
-    proxyGroupOptions,
-    proxyGroupGroups,
-    proxyHint,
     applyConfig,
     applyRemoteConfig,
     onConfigApplied,
-    setProxyMode,
-    selectProxyGroup,
     setCustomProxyInput,
     payload,
     loadConfig,
-    loadProxyGroups,
     saveConfig,
     toggleTask,
     resetStats,

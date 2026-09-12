@@ -1,17 +1,9 @@
 import { parseProxyReference, serializeProxyReference } from '@/api/proxy'
-import type { ProxyGroup } from '@/api/proxy'
 import type { LegacyRegisterConfig, RegisterProvider } from '@/api/register'
 import { CHROME146_USER_AGENT } from '@/lib/browserFingerprint'
 
 export type RegisterMode = 'total' | 'quota' | 'available'
-export type RegisterProxyMode = 'global' | 'direct' | 'group' | 'custom'
 export type RuntimeLogLevel = 'info' | 'success' | 'warning' | 'error'
-
-export type RegisterProxyControlState = {
-  mode: RegisterProxyMode
-  groupId: string
-  customProxy: string
-}
 
 export type RegisterMetricItem = {
   key: string
@@ -45,14 +37,7 @@ export const registerModeOptions = [
 
 export const registerModeGroups = [{ options: registerModeOptions }]
 
-export const registerProxyModeOptions = [
-  { value: 'global', label: '使用默认代理' },
-  { value: 'direct', label: '直连' },
-  { value: 'group', label: '代理组' },
-  { value: 'custom', label: '自定义代理' },
-] as const
-
-export const registerProxyModeGroups = [{ options: registerProxyModeOptions }]
+export const registerProxyHint = '注册必须使用住宅代理，不能用默认出口或代理组。'
 
 export const remailServiceModeOptions = [
   { value: 'code', label: 'code 短效接码' },
@@ -101,7 +86,7 @@ export const defaultRegisterConfig: LegacyRegisterConfig = {
     providers: [],
   },
   proxy: '',
-  proxy_required: false,
+  proxy_required: true,
   max_inflight_per_proxy: 0,
   total: 10,
   threads: 2,
@@ -218,7 +203,8 @@ export function normalizeRegisterConfig(raw: LegacyRegisterConfig): LegacyRegist
     ...defaultRegisterConfig,
     ...raw,
     threads: Math.min(16, Math.max(1, Number(raw.threads) || defaultRegisterConfig.threads)),
-    proxy_required: Boolean(raw.proxy_required),
+    proxy: normalizeRegisterProxyValue(raw.proxy),
+    proxy_required: true,
     max_inflight_per_proxy: Math.max(0, Number(raw.max_inflight_per_proxy) || 0),
     mail,
     register_peak: {
@@ -246,61 +232,41 @@ export function providerTypeLabel(type: string) {
   return providerTypeOptions.find(item => item.value === type)?.label || type
 }
 
-export function registerProxyHint(mode: RegisterProxyMode) {
-  if (mode === 'direct') return '本次注册任务强制直连，不读取默认代理。'
-  if (mode === 'group') return '注册任务会使用所选代理组；代理组为空时不会偷偷回退到默认代理。'
-  if (mode === 'custom') return '仅本注册任务使用该代理地址。'
-  return '默认使用系统设置里的默认代理；默认代理设为直连时不使用代理。'
-}
+const registerProxySchemes = new Set(['http', 'https', 'socks', 'socks5', 'socks5h'])
+const registerProxyReferences = new Set(['', 'direct', 'global'])
 
-export function registerProxyGroupOptions(groups: readonly ProxyGroup[], selectedId = '') {
-  const rows = groups.map((group) => ({
-    label: `${group.enabled === false ? '停用 · ' : ''}${group.name || group.id}${Array.isArray(group.nodes) ? ` · ${group.nodes.length} 个节点` : ''}`,
-    value: group.id,
-  }))
-  if (selectedId && !rows.some((item) => item.value === selectedId)) {
-    rows.unshift({ label: `未知代理组 · ${selectedId}`, value: selectedId })
+function coerceRegisterProxyInput(value: string): string {
+  const raw = value.trim()
+  if (!raw || raw.includes('://')) return raw
+  const parts = raw.split(':')
+  if (parts.length === 2 && /^\d+$/.test(parts[1] || '')) return `http://${raw}`
+  if (parts.length === 4 && /^\d+$/.test(parts[1] || '')) {
+    return `http://${encodeURIComponent(parts[2] || '')}:${encodeURIComponent(parts[3] || '')}@${parts[0]}:${parts[1]}`
   }
-  return [
-    { label: '选择代理组', value: '' },
-    ...rows,
-  ]
+  return raw
 }
 
-export function normalizeRegisterProxyMode(value: string): RegisterProxyMode {
-  return ['global', 'direct', 'group', 'custom'].includes(value)
-    ? value as RegisterProxyMode
-    : 'global'
+export function isRegisterProxyUrl(value: unknown): boolean {
+  const raw = String(value || '').trim()
+  const lower = raw.toLowerCase()
+  if (!raw || registerProxyReferences.has(lower) || lower.startsWith('group:') || lower.startsWith('profile:')) {
+    return false
+  }
+  try {
+    const parsed = new URL(coerceRegisterProxyInput(raw))
+    const scheme = parsed.protocol.replace(/:$/, '').toLowerCase()
+    return registerProxySchemes.has(scheme) && Boolean(parsed.host)
+  } catch {
+    return false
+  }
 }
 
-export function registerProxyControlFromValue(value: unknown): RegisterProxyControlState {
+export function normalizeRegisterProxyValue(value: unknown): string {
   const reference = parseProxyReference(value)
-  if (reference.mode === 'group') {
-    return { mode: 'group', groupId: reference.value, customProxy: '' }
-  }
-  if (reference.mode === 'direct') {
-    return { mode: 'direct', groupId: '', customProxy: '' }
-  }
-  if (reference.mode === 'custom' || reference.mode === 'profile') {
-    return {
-      mode: 'custom',
-      groupId: '',
-      customProxy: reference.mode === 'profile' ? String(value || '').trim() : reference.value,
-    }
-  }
-  return { mode: 'global', groupId: '', customProxy: '' }
-}
-
-export function registerProxyValueFromControl(
-  mode: string,
-  groupId = '',
-  customProxy = '',
-): string {
-  const nextMode = normalizeRegisterProxyMode(mode)
-  if (nextMode === 'global') return serializeProxyReference('global')
-  if (nextMode === 'direct') return serializeProxyReference('direct')
-  if (nextMode === 'group') return serializeProxyReference('group', groupId)
-  return serializeProxyReference('custom', customProxy)
+  if (reference.mode !== 'custom') return ''
+  const raw = serializeProxyReference('custom', reference.value)
+  if (!isRegisterProxyUrl(raw)) return ''
+  return coerceRegisterProxyInput(raw)
 }
 
 export function providerKeysForType(type: string, includeLocalOnly = false) {
@@ -406,11 +372,12 @@ export function legacyRegisterPayload(config: LegacyRegisterConfig): Partial<Leg
   return {
     mail: {
       ...config.mail,
+      api_use_register_proxy: false,
       user_agent: chrome146UserAgent(config.mail.user_agent),
       providers: (config.mail.providers || []).map(sanitizedProviderPayload),
     },
-    proxy: String(config.proxy || '').trim(),
-    proxy_required: Boolean(config.proxy_required),
+    proxy: normalizeRegisterProxyValue(config.proxy),
+    proxy_required: true,
     max_inflight_per_proxy: Math.max(0, Number(config.max_inflight_per_proxy) || 0),
     total: Math.max(1, Number(config.total) || 1),
     threads: Math.min(16, Math.max(1, Number(config.threads) || 1)),
@@ -629,6 +596,7 @@ export function registerActionDisabled(
   if (legacySaving || !config) return true
   if (registerTaskState(config) === 'stopping') return true
   if (config.enabled) return false
+  if (!normalizeRegisterProxyValue(config.proxy)) return true
   return enabledCount === 0 || issueCount > 0
 }
 
@@ -661,6 +629,7 @@ export function registerRuntimeHint(
 ) {
   if (enabledCount === 0) return '至少启用一个邮箱来源。'
   if (issueCount > 0) return `还有 ${issueCount} 项必填配置未完成。`
+  if (!normalizeRegisterProxyValue(config?.proxy)) return '请填写住宅代理后再启动。'
   if (registerTaskState(config) === 'stopping') return '任务正在停止，等待当前运行任务结束。'
   if (registerTaskState(config) === 'paused') return '任务已开启但未实际运行，通常是注册代理或账号池暂不可用。'
   if (config?.enabled) return '任务运行中，配置已锁定。'

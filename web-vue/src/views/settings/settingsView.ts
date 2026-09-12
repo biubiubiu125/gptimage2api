@@ -57,7 +57,7 @@ const settingsOptionLabels: Record<string, Record<string, string>> = {
     editable_files: 'PPT / PSD 文件',
     images: '图片文件目录',
     image_queue: 'Image Queue Store',
-    register: '注册机状态',
+    register: '注册账号状态',
   },
 }
 
