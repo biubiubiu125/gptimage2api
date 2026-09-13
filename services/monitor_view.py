@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from services.image_queue.resource_controller import ResourceController
 from services.request_detail_view import request_proxy_source_label, request_status_presentation
 
 
@@ -689,6 +690,7 @@ def _build_diagnostic_groups(
     summary: Mapping[str, Any],
     thread_tokens: int,
     completed_window_text: str,
+    queue_capacity: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     p95 = _mapping(summary.get("metric_p95"))
     slow = _mapping(summary.get("slow_counts"))
@@ -698,6 +700,23 @@ def _build_diagnostic_groups(
     switch_success = _int(summary.get("account_switch_success"))
     switch_unrecovered = _int(summary.get("switch_unrecovered"))
     active_egress_meta = _active_egress_meta(summary)
+    capacity = _mapping(queue_capacity)
+    generation_limit = _int(capacity.get("generation_limit"))
+    remaining_slots = _int(capacity.get("remaining_account_slots"))
+    occupancy_paused = bool(capacity.get("occupancy_paused"))
+    pause_reason = str(capacity.get("pause_reason") or "")
+    occupancy_meta = pause_reason or "CPU / 内存 / Swap 占用 90% 关门，低于 80% 开门"
+    gate_closed = ResourceController.generation_gate_closed(occupancy_paused, pause_reason)
+    occupancy_value = "已关门" if gate_closed else ("开着" if capacity else "-")
+    occupancy_tone = "danger" if gate_closed else ("success" if capacity else "muted")
+    if gate_closed:
+        effective_generation = 0
+    elif "effective_generation" in capacity:
+        effective_generation = _int(capacity.get("effective_generation"))
+    elif generation_limit:
+        effective_generation = min(generation_limit, remaining_slots)
+    else:
+        effective_generation = 0
     return [
         {
             "key": "overview",
@@ -727,6 +746,19 @@ def _build_diagnostic_groups(
                 _diagnostic_item("active_egress", "活跃出口", _int(summary.get("active_egress_count")), active_egress_meta, "info"),
                 _diagnostic_item("egress_wait_slow", "出口等待慢请求", _int(slow.get("egress_wait")), "等待超过 1 秒", "warning" if _int(slow.get("egress_wait")) else "muted"),
                 _diagnostic_item("local_busy", "本地拒绝/繁忙", local_busy, "无号 / 并发 / 策略", "danger" if local_busy else "muted"),
+            ],
+        },
+        {
+            "key": "generation_capacity",
+            "title": "生图容量",
+            "meta": "本机上限、门口令牌、账号空位、资源门闩",
+            "items": [
+                _diagnostic_item("generation_limit", "生图上限", generation_limit or "-", "0 表示自动，启动时按核数计算", "info"),
+                _diagnostic_item("current_generation", "当前在画", _int(capacity.get("current_generation")), "正在生成的图片", "info"),
+                _diagnostic_item("remaining_account_slots", "账号空位", remaining_slots if capacity else "-", f"可用账号 {_int(capacity.get('available_accounts'))}", "info"),
+                _diagnostic_item("effective_generation", "有效并发", effective_generation if capacity else "-", "min(生图上限, 账号空位)", "info"),
+                _diagnostic_item("thread_capacity", "门口令牌", thread_tokens or "-", "启动时 = 生图上限 × 2，0 表示自动", "info"),
+                _diagnostic_item("occupancy_gate", "资源门闩", occupancy_value, occupancy_meta, occupancy_tone),
             ],
         },
         {
@@ -824,7 +856,12 @@ def build_monitor_view(snapshot: Mapping[str, Any]) -> dict[str, Any]:
             for label, count in list(summary["active_by_stage"].items())[:8]
             if _int(count) > 0
         ],
-        "diagnostic_groups": _build_diagnostic_groups(summary, threadpool["tokens"], completed_window_text),
+        "diagnostic_groups": _build_diagnostic_groups(
+            summary,
+            threadpool["tokens"],
+            completed_window_text,
+            _mapping(snapshot.get("queue_capacity")),
+        ),
     }
 
 

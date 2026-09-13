@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:18-alpine
+    command: ["postgres", "-c", "max_connections=300"]
     container_name: gptimage2api-postgres
     restart: unless-stopped
     networks:

@@ -32,6 +32,122 @@ T = TypeVar("T")
 CLAIM_MAX_RUNTIME_MESSAGE = "image job claim exceeded maximum runtime"
 
 
+def compute_remaining_account_slots(
+    *,
+    available_accounts: int,
+    account_concurrency: int,
+    occupied_slots: int | None,
+) -> int:
+    if occupied_slots is None:
+        return 0
+    try:
+        occupied = max(0, int(occupied_slots))
+    except (TypeError, ValueError):
+        return 0
+    return max(
+        0,
+        int(available_accounts) * max(1, int(account_concurrency)) - occupied,
+    )
+
+
+def occupied_account_slots_for_capacity(*, in_process: int, lease_count: int | None) -> int | None:
+    local = max(0, int(in_process))
+    if lease_count is None:
+        return None
+    try:
+        leases = max(0, int(lease_count))
+    except (TypeError, ValueError):
+        return None
+    return max(local, leases)
+
+
+def count_leases_for_candidates(count_leases, candidates) -> int | None:
+    if not callable(count_leases):
+        return None
+    ids: list[object] = []
+    seen: set[object] = set()
+    for item in candidates or ():
+        account_id = getattr(item, "account_id", None)
+        if account_id is None or account_id in seen:
+            continue
+        seen.add(account_id)
+        ids.append(account_id)
+    try:
+        return max(0, int(count_leases(account_ids=ids)))
+    except TypeError:
+        try:
+            return max(0, int(count_leases()))
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def release_claim_for_occupancy(repository: Any, claim: Any) -> None:
+    release = getattr(repository, "release_claim", None)
+    if not callable(release):
+        return
+    try:
+        release(claim, refund_attempt=True)
+    except TypeError:
+        release(claim)
+
+
+def claim_generation_allowed(*, plan_allows: bool, occupancy_paused: bool) -> bool:
+    return bool(plan_allows) and not bool(occupancy_paused)
+
+
+def allow_generation_claim(*, occupancy_allows: bool, remaining_account_slots: int) -> bool:
+    try:
+        remaining = int(remaining_account_slots)
+    except (TypeError, ValueError):
+        remaining = 0
+    return bool(occupancy_allows) and remaining > 0
+
+
+def bind_worker_resource_controller(
+    resource_controller: ResourceController | None,
+    settings: ImageQueueSettings,
+    database: Any | None,
+) -> ResourceController:
+    if resource_controller is not None:
+        return resource_controller
+    return ResourceController(settings, database=database).fail_closed("resource_pressure")
+
+
+def live_generation_allowed(
+    resource_controller: Any,
+    *,
+    plan_allows: bool,
+    snapshot: Any | None = None,
+) -> bool:
+    if not plan_allows or resource_controller is None:
+        return False
+    allow = getattr(resource_controller, "allow_new_generation", None)
+    if callable(allow):
+        try:
+            decision = allow(snapshot) if snapshot is not None else allow()
+        except TypeError:
+            decision = allow()
+        return bool(getattr(decision, "allowed", False))
+    return claim_generation_allowed(
+        plan_allows=True,
+        occupancy_paused=bool(getattr(resource_controller, "occupancy_paused", False)),
+    )
+
+
+def current_image_account_concurrency(fallback: int = 1) -> int:
+    try:
+        fallback_value = max(1, int(fallback or 1))
+    except (TypeError, ValueError):
+        fallback_value = 1
+    try:
+        value = int(getattr(config, "image_account_concurrency", None) or fallback_value)
+    except (TypeError, ValueError):
+        value = fallback_value
+    return max(1, value)
+
+
 class ClaimMaxRuntimeExceeded(RuntimeError):
     """A claim outlived ``claim_max_runtime_seconds``.
 
@@ -164,9 +280,10 @@ class ImageWorkerManager:
         self.execute_job = executor
         self._execute_job_accepts_runtime_guard = self._callable_accepts_runtime_guard(executor)
         self.settings = settings
-        self.resource_controller = resource_controller or ResourceController(
+        self.resource_controller = bind_worker_resource_controller(
+            resource_controller,
             settings,
-            database=repository.database,
+            getattr(repository, "database", None),
         )
         self.retry_policy = retry_policy or RetryPolicy(settings)
         self.state_change_callback = state_change_callback
@@ -923,9 +1040,13 @@ class ImageWorkerManager:
             if self.local_recovery_callback is not None:
                 self.local_recovery_callback()
             self._next_recovery_at = now + self._recovery_interval
-        snapshot = self.resource_controller.sample()
-        generation_decision = self.resource_controller.allow_new_generation(snapshot)
-        recovery_decision = self._allow_recovery(snapshot)
+        evaluate = getattr(self.resource_controller, "evaluate", None)
+        if callable(evaluate):
+            snapshot, generation_decision, recovery_decision = evaluate()
+        else:
+            snapshot = self.resource_controller.sample()
+            generation_decision = self.resource_controller.allow_new_generation(snapshot)
+            recovery_decision = self._allow_recovery(snapshot)
         candidates: Sequence[Any] = ()
         account_stats = {}
         try:
@@ -952,15 +1073,64 @@ class ImageWorkerManager:
         )
         effective_generation_limit = max(0, int(plan.generation_limit))
         active_generation_count = self._active_generation_count()
-        if plan.allow_generation or plan.allow_recovery:
+        try:
             candidates = self.account_service.list_image_account_candidates()
+        except Exception:
+            candidates = ()
         with self._lock:
             current_concurrency = len(self._futures)
+            occupied_account_slots = 0
+            for claim in self._futures.values():
+                try:
+                    if int(getattr(claim, "account_slot", -1)) >= 0:
+                        occupied_account_slots += 1
+                except (TypeError, ValueError):
+                    continue
         snapshot_data["current_concurrency"] = current_concurrency
         snapshot_data["current_generation_concurrency"] = active_generation_count
         snapshot_data["effective_concurrency"] = effective_generation_limit
         snapshot_data["remaining_capacity"] = max(0, effective_generation_limit - active_generation_count)
         snapshot_data["available_account_count"] = len(candidates)
+        account_concurrency = current_image_account_concurrency(self.account_concurrency)
+        self.account_concurrency = account_concurrency
+        reclaim_expired = getattr(
+            self.repository,
+            "reclaim_expired_inactive_account_leases",
+            None,
+        )
+        if callable(reclaim_expired):
+            try:
+                reclaim_expired()
+            except Exception as exc:
+                logger.error({
+                    "event": "image_worker_reclaim_expired_account_leases_failed",
+                    "error": str(exc),
+                })
+        lease_count = count_leases_for_candidates(
+            getattr(self.repository, "count_account_leases", None),
+            candidates,
+        )
+        occupied_slots = occupied_account_slots_for_capacity(
+            in_process=occupied_account_slots,
+            lease_count=lease_count,
+        )
+        remaining_account_slots = compute_remaining_account_slots(
+            available_accounts=len(candidates),
+            account_concurrency=account_concurrency,
+            occupied_slots=occupied_slots,
+        )
+        generation_limit = max(1, int(self.settings.generation_concurrency_limit))
+        snapshot_data["remaining_account_slots"] = remaining_account_slots
+        snapshot_data["generation_concurrency_limit"] = generation_limit
+        occupancy_paused = bool(
+            getattr(self.resource_controller, "occupancy_paused", False)
+        )
+        snapshot_data["occupancy_paused"] = occupancy_paused
+        snapshot_data["effective_generation"] = (
+            0
+            if occupancy_paused or not generation_decision.allowed
+            else min(generation_limit, remaining_account_slots)
+        )
         snapshot_data["available_quota"] = max(0, int(account_stats.get("total_quota") or 0))
         snapshot_data["unlimited_quota_count"] = max(0, int(account_stats.get("unlimited_quota_count") or 0))
         snapshot_data["unknown_quota_count"] = max(0, int(account_stats.get("unknown_quota_count") or 0))
@@ -981,7 +1151,13 @@ class ImageWorkerManager:
         )
         recovery_capacity = self.recovery_thread_cap - self._active_recovery_count()
         allow_recovery = plan.allow_recovery and recovery_capacity > 0
-        allow_generation = plan.allow_generation
+        allow_generation = allow_generation_claim(
+            occupancy_allows=live_generation_allowed(
+                self.resource_controller,
+                plan_allows=plan.allow_generation,
+            ),
+            remaining_account_slots=remaining_account_slots,
+        )
         if capacity <= 0 or (not allow_generation and not allow_recovery):
             self._wake.wait(self.settings.poll_interval_seconds)
             self._wake.clear()
@@ -990,7 +1166,7 @@ class ImageWorkerManager:
             claim = self.repository.claim_next_job(
                 self.worker_id,
                 candidates,
-                self.account_concurrency,
+                account_concurrency,
                 allow_generation=allow_generation,
                 recovery_only=allow_recovery and not allow_generation,
                 prefer_recovery=allow_recovery,
@@ -1014,12 +1190,27 @@ class ImageWorkerManager:
             self._wake.wait(self.settings.poll_interval_seconds)
             self._wake.clear()
             return
+        if not is_recovery_stage(claim.job.stage) and not live_generation_allowed(
+            self.resource_controller,
+            plan_allows=True,
+        ):
+            try:
+                release_claim_for_occupancy(self.repository, claim)
+            except Exception as exc:
+                logger.error({
+                    "event": "image_worker_occupancy_release_failed",
+                    "job_id": str(claim.job.id),
+                    "error": str(exc),
+                })
+            self._wake.wait(self.settings.poll_interval_seconds)
+            self._wake.clear()
+            return
         # Route recovery/saving work to the dedicated recovery pool so generation
         # pressure cannot starve checkpoint resume.
         if is_recovery_stage(claim.job.stage):
             if recovery_capacity <= 0:
                 try:
-                    self.repository.release_claim(claim)
+                    release_claim_for_occupancy(self.repository, claim)
                 except Exception as exc:
                     logger.error({
                         "event": "image_worker_recovery_release_failed",

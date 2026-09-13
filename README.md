@@ -183,10 +183,14 @@ curl http://localhost:2080/v1/images/generations \
 | `GPTIMAGE2API_AUTH_KEY`          | 必填         | 管理员和默认 API Key，环境变量优先于 `config.json`                                       |
 | `DATABASE_URL`                   | PostgreSQL   | Application Database 连接；本地默认使用 `data/gptimage2api.db`                          |
 | `GPTIMAGE2API_BASE_URL`          | 当前服务地址 | 生成对外可访问的图片和文件 URL                                                           |
-| `GPTIMAGE2API_THREAD_TOKENS`     | `120`        | 后端同步工作线程并发容量，只要求正整数且不设固定最高值；账号、代理和上游仍有各自并发限制 |
+| `GPTIMAGE2API_THREAD_TOKENS`     | `0`          | 门口同步线程容量；`0` 表示自动（生图上限 × 2），手填正整数覆盖自动；账号、代理和上游仍有各自并发限制 |
 | `GPTIMAGE2API_IMAGE_QUEUE_DATABASE_URL` | 必填      | 独立 Image Queue Store PostgreSQL 连接                                                   |
-| `GPTIMAGE2API_IMAGE_QUEUE_GENERATION_CONCURRENCY` | `4` | 单体队列生图 Worker 并发容量                                                          |
-| `GPTIMAGE2API_IMAGE_QUEUE_MAX_BACKLOG` | `256` | 队列最大待处理任务数                                                                  |
+| `GPTIMAGE2API_IMAGE_QUEUE_GENERATION_CONCURRENCY` | `0` | 本机生图并发上限；`0` 表示自动（`min(2000, max(300, 核数×300))`），手填正整数覆盖自动 |
+| `GPTIMAGE2API_IMAGE_QUEUE_OCCUPANCY_PAUSE_PERCENT` | `90` | CPU/内存/Swap 占用达到该百分比并持续约 2.5 秒后停止新入队、新生图和新注册 |
+| `GPTIMAGE2API_IMAGE_QUEUE_OCCUPANCY_RESUME_PERCENT` | `80` | 三项都低于该百分比并持续约 2.5 秒后恢复接新任务 |
+| `GPTIMAGE2API_IMAGE_QUEUE_OCCUPANCY_HOLD_SECONDS` | `2.5` | 占用门开关前的持续采样时间 |
+| `GPTIMAGE2API_IMAGE_QUEUE_ABSOLUTE_GUARD` | `0` | 进程线程硬墙；`0` 表示自动 |
+| `GPTIMAGE2API_IMAGE_QUEUE_MAX_BACKLOG` | `50` | 队列最大待处理任务数                                                                  |
 | `account_processing_concurrency` | `30`         | 账号导入、刷新、同步和批量处理容量                                                       |
 | `image_account_concurrency`      | `1`          | 单账号图片并发上限，可设置为 1–3                                                         |
 | `image_stream_timeout_secs`      | `80`         | 图片上游 SSE / HTTP 流最长等待时间                                                       |

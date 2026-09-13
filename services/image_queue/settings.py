@@ -16,6 +16,9 @@ DEFAULT_PENDING_TTL_SECONDS = 30 * 60
 DEFAULT_GENERATION_CONCURRENCY_HARD_CAP = 99999
 MAX_GENERATION_CONCURRENCY_HARD_CAP = 99999
 MAX_ABSOLUTE_GUARD = 99999
+AUTO_GENERATION_CONCURRENCY_FLOOR = 300
+AUTO_GENERATION_CONCURRENCY_PER_CORE = 300
+AUTO_GENERATION_CONCURRENCY_CAP = 2000
 ESTIMATED_GENERATION_MEMORY_BYTES = 384 * 1024**2
 FALLBACK_AVAILABLE_MEMORY_BYTES = 8 * 1024**3
 DEFAULT_PROMPT_SUFFIX = (
@@ -189,12 +192,42 @@ def _adaptive_generation_concurrency_default(
     cpu_cores: int | None = None,
     available_memory_bytes: int | None = None,
 ) -> int:
+    del available_memory_bytes
     runtime_limit = max(1, int(runtime_limit or _runtime_image_concurrency_limit()))
     cpu_cores = max(1, int(cpu_cores or _detected_cpu_cores()))
-    available_memory_bytes = max(1, int(available_memory_bytes or _detected_available_memory_bytes()))
-    cpu_slots = max(1, cpu_cores * 2)
-    memory_slots = max(1, available_memory_bytes // ESTIMATED_GENERATION_MEMORY_BYTES)
-    return max(1, min(runtime_limit, cpu_slots, memory_slots))
+    auto_limit = min(
+        AUTO_GENERATION_CONCURRENCY_CAP,
+        max(AUTO_GENERATION_CONCURRENCY_FLOOR, cpu_cores * AUTO_GENERATION_CONCURRENCY_PER_CORE),
+    )
+    return max(1, min(runtime_limit, auto_limit))
+
+
+def resolve_generation_concurrency_limit(*, cpu_cores: int | None = None) -> int:
+    hard_cap = _coerce_int(
+        _first_env_value("IMAGE_QUEUE_GENERATION_CONCURRENCY_CAP", 0),
+        0,
+        0,
+        MAX_GENERATION_CONCURRENCY_HARD_CAP,
+    )
+    if hard_cap <= 0:
+        hard_cap = DEFAULT_GENERATION_CONCURRENCY_HARD_CAP
+    generation_limit = _coerce_int(
+        _first_env_value("IMAGE_QUEUE_GENERATION_CONCURRENCY", 0),
+        0,
+        0,
+        hard_cap,
+    )
+    if generation_limit <= 0:
+        generation_limit = _adaptive_generation_concurrency_default(cpu_cores=cpu_cores)
+    return max(1, min(generation_limit, hard_cap))
+
+
+def _auto_database_pool_size(generation_limit: int) -> int:
+    return max(20, min(80, max(1, int(generation_limit)) // 8))
+
+
+def _auto_database_max_overflow(generation_limit: int) -> int:
+    return max(10, min(40, max(1, int(generation_limit)) // 16))
 
 
 def _adaptive_absolute_guard_default(
@@ -205,8 +238,12 @@ def _adaptive_absolute_guard_default(
     cpu_cores = max(1, int(cpu_cores or _detected_cpu_cores()))
     floor_threads = _estimated_worker_floor_threads(cpu_cores)
     generation_threads = max(8, int(generation_concurrency or 1))
-    reserve_threads = max(16, cpu_cores)
-    return max(floor_threads + 8, floor_threads + generation_threads + reserve_threads)
+    door_tokens = generation_threads * 2
+    process_reserve = max(64, cpu_cores * 8)
+    return max(
+        8,
+        floor_threads + generation_threads + door_tokens + process_reserve,
+    )
 
 
 def _runtime_image_concurrency_default() -> int:
@@ -234,6 +271,9 @@ class ImageQueueSettings:
     memory_throttle_percent: float = 85.0
     memory_pause_percent: float = 90.0
     memory_reject_percent: float = 95.0
+    occupancy_pause_percent: float = 90.0
+    occupancy_resume_percent: float = 80.0
+    occupancy_hold_seconds: float = 2.5
     # 0 means "auto": compute a machine-aware default in __post_init__.
     absolute_guard: int = 0
     generation_concurrency_limit: int = 0
@@ -277,9 +317,32 @@ class ImageQueueSettings:
             absolute_guard = _adaptive_absolute_guard_default(generation_limit)
         absolute_guard = _coerce_int(absolute_guard, 8, 8, MAX_ABSOLUTE_GUARD)
 
+        occupancy_pause = max(1.0, float(self.occupancy_pause_percent or 90.0))
+        occupancy_resume = max(1.0, float(self.occupancy_resume_percent or 80.0))
+        if occupancy_resume >= occupancy_pause:
+            occupancy_resume = max(1.0, occupancy_pause - 10.0)
+        occupancy_hold = max(0.1, float(self.occupancy_hold_seconds or 2.5))
+
+        pool_size = _coerce_int(self.database_pool_size, 0, 0, 200)
+        if pool_size <= 0:
+            pool_size = _auto_database_pool_size(generation_limit)
+        overflow = int(self.database_max_overflow)
+        try:
+            overflow = int(overflow)
+        except (TypeError, ValueError):
+            overflow = -1
+        if overflow < 0:
+            overflow = _auto_database_max_overflow(generation_limit)
+        overflow = max(0, min(200, overflow))
+
         object.__setattr__(self, "generation_concurrency_hard_cap", hard_cap)
         object.__setattr__(self, "generation_concurrency_limit", generation_limit)
         object.__setattr__(self, "absolute_guard", absolute_guard)
+        object.__setattr__(self, "occupancy_pause_percent", occupancy_pause)
+        object.__setattr__(self, "occupancy_resume_percent", occupancy_resume)
+        object.__setattr__(self, "occupancy_hold_seconds", occupancy_hold)
+        object.__setattr__(self, "database_pool_size", pool_size)
+        object.__setattr__(self, "database_max_overflow", overflow)
 
     @classmethod
     def from_env(cls) -> "ImageQueueSettings":
@@ -366,6 +429,9 @@ class ImageQueueSettings:
             memory_throttle_percent=_env_float("IMAGE_QUEUE_MEMORY_THROTTLE_PERCENT", 85.0, 1.0),
             memory_pause_percent=_env_float("IMAGE_QUEUE_MEMORY_PAUSE_PERCENT", 90.0, 1.0),
             memory_reject_percent=_env_float("IMAGE_QUEUE_MEMORY_REJECT_PERCENT", 95.0, 1.0),
+            occupancy_pause_percent=_env_float("IMAGE_QUEUE_OCCUPANCY_PAUSE_PERCENT", 90.0, 1.0),
+            occupancy_resume_percent=_env_float("IMAGE_QUEUE_OCCUPANCY_RESUME_PERCENT", 80.0, 1.0),
+            occupancy_hold_seconds=_env_float("IMAGE_QUEUE_OCCUPANCY_HOLD_SECONDS", 2.5, 0.1),
             absolute_guard=_env_int("IMAGE_QUEUE_ABSOLUTE_GUARD", 0, 0, MAX_ABSOLUTE_GUARD),
             generation_concurrency_limit=_env_int(
                 "IMAGE_QUEUE_GENERATION_CONCURRENCY",
@@ -394,8 +460,8 @@ class ImageQueueSettings:
             ),
             prompt_suffix_enabled=_env_bool("IMAGE_PROMPT_SUFFIX_ENABLED", True),
             prompt_suffix=str(_first_env_value("IMAGE_PROMPT_SUFFIX", DEFAULT_PROMPT_SUFFIX)).strip(),
-            database_pool_size=_env_int("IMAGE_QUEUE_DB_POOL_SIZE", 20, 2, 100),
-            database_max_overflow=_env_int("IMAGE_QUEUE_DB_MAX_OVERFLOW", 10, 0, 100),
+            database_pool_size=_env_int("IMAGE_QUEUE_DB_POOL_SIZE", 0, 0, 200),
+            database_max_overflow=_env_int("IMAGE_QUEUE_DB_MAX_OVERFLOW", -1, -1, 200),
             artifact_root=root,
             legacy_task_path=legacy_task_path,
             instance_id=instance_id,

@@ -447,6 +447,7 @@ class RegisterService:
         self._store = create_register_config_store(store_file)
         openai_register.register_log_sink = self._append_log
         self._config = self._load()
+        self._fallback_resource_controller = None
         openai_register.config.pop("max_inflight_per_proxy", None)
         openai_register.config.update({
             key: self._config[key]
@@ -660,8 +661,28 @@ class RegisterService:
         if not self._integrations_ready():
             self._bump(pause_reason="mail_provider_unavailable")
             return False
+        controller = self._resource_controller()
+        if controller is None:
+            self._bump(pause_reason="resource_pressure")
+            return False
+        decision = controller.allow_new_registration()
+        if not decision.allowed:
+            self._bump(pause_reason=decision.reason or "resource_pressure")
+            return False
         self._bump(pause_reason="")
         return True
+
+    def _resource_controller(self):
+        try:
+            from services.image_task_service import image_task_service
+            if image_task_service is None:
+                return None
+            controller = image_task_service._resource_controller()
+        except Exception:
+            return None
+        if controller is not None:
+            return controller
+        return None
 
 
     def _save(self) -> None:

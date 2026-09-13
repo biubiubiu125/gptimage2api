@@ -26,7 +26,7 @@ from services.log_service import log_service
 from services.realtime_monitor_service import realtime_monitor_service
 from services.register_service import register_service
 from services.retention_cleanup_service import retention_cleanup_coordinator, start_retention_cleanup_scheduler
-from services.runtime_configuration import DEFAULT_THREAD_TOKENS, env_value
+from services.runtime_configuration import resolve_thread_tokens
 from utils.log import logger
 
 
@@ -126,15 +126,7 @@ def _finish_backup_restore_maintenance() -> None:
 
 
 def _configure_threadpool() -> None:
-    raw_tokens = env_value(
-        "GPTIMAGE2API_THREAD_TOKENS",
-        "CHATGPT2API_THREAD_TOKENS",
-        default=str(DEFAULT_THREAD_TOKENS),
-    )
-    try:
-        tokens = max(1, int(raw_tokens))
-    except (TypeError, ValueError):
-        tokens = DEFAULT_THREAD_TOKENS
+    tokens = resolve_thread_tokens()
     limiter = current_default_thread_limiter()
     previous = int(getattr(limiter, "total_tokens", 0) or 0)
     if previous != tokens:

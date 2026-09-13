@@ -31,7 +31,7 @@ from services.image_queue.resource_controller import (
     ImageQueueResourcePressureError,
     ImageQueueStorageFullError,
 )
-from services.image_failure import image_failure, public_image_error_message
+from services.image_failure import image_failure, image_queue_http_message, public_image_error_message
 from services.image_task_view import canonical_image_task_status, image_task_page, image_task_row
 from services.log_service import LoggedCall
 from services.quota_service import reserve_quota
@@ -160,11 +160,7 @@ def _image_queue_http_exception(exc: Exception) -> HTTPException:
     code = str(getattr(exc, "code", "") or "image_queue_unavailable")
     detail: dict[str, object] = {
         "error": code,
-        "message": (
-            "image queue storage is full"
-            if code == "image_queue_storage_full"
-            else "image queue is temporarily unavailable"
-        ),
+        "message": image_queue_http_message(code),
     }
     reason = str(getattr(exc, "reason", "") or "").strip()
     if code == "image_queue_resource_pressure" and reason:
@@ -178,7 +174,7 @@ def _image_stream_error_payload(exc: Exception, task_id: str) -> dict[str, objec
         if isinstance(detail, dict):
             return {
                 "error": {
-                    "message": str(detail.get("message") or "image queue is temporarily unavailable"),
+                    "message": str(detail.get("message") or image_queue_http_message()),
                     "type": "server_error",
                     "code": str(detail.get("error") or "image_queue_unavailable"),
                     "task_id": task_id,

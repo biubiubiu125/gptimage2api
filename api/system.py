@@ -50,6 +50,7 @@ from services.gallery_view import (
 )
 from services.genbox_push_service import GenBoxPushError, push_gallery_image
 from services.image_task_service import image_task_service
+from services.image_failure import image_queue_http_message
 from services.image_queue.database import ImageQueueUnavailableError
 from services.image_queue.resource_controller import (
     ImageQueueResourcePressureError,
@@ -158,11 +159,7 @@ def _image_maintenance_http_exception(exc: Exception) -> HTTPException:
     }:
         detail: dict[str, object] = {
             "error": code,
-            "message": (
-                "image queue storage is full"
-                if code == "image_queue_storage_full"
-                else "image queue is temporarily unavailable"
-            ),
+            "message": image_queue_http_message(code),
         }
         reason = str(getattr(exc, "reason", "") or "").strip()
         if code == "image_queue_resource_pressure" and reason:
@@ -514,7 +511,9 @@ def create_router(app_version: str) -> APIRouter:
     )
     async def get_realtime_monitor(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return build_monitor_view(realtime_monitor_service.snapshot())
+        snapshot = realtime_monitor_service.snapshot()
+        snapshot["queue_capacity"] = image_task_service.queue_capacity_view()
+        return build_monitor_view(snapshot)
 
     @router.get(
         "/api/monitor/realtime/{call_id}",

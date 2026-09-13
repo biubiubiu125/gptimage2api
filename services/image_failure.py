@@ -294,6 +294,12 @@ IMAGE_TOOL_ERROR_PUBLIC_MESSAGE = "The image generation tool encountered an erro
 IMAGE_QUOTA_PUBLIC_MESSAGE = "No image generation quota is currently available."
 IMAGE_QUEUE_UNAVAILABLE_PUBLIC_MESSAGE = "Image queue is temporarily unavailable. Please try again."
 IMAGE_QUEUE_STORAGE_FULL_PUBLIC_MESSAGE = "Image queue storage is full. Please try again later."
+
+
+def image_queue_http_message(code: str = "") -> str:
+    if str(code or "").strip() == "image_queue_storage_full":
+        return IMAGE_QUEUE_STORAGE_FULL_PUBLIC_MESSAGE
+    return IMAGE_QUEUE_UNAVAILABLE_PUBLIC_MESSAGE
 IMAGE_TASK_PENDING_PUBLIC_MESSAGE = (
     "Image task is still running. Poll the task status and try again."
 )

@@ -6,7 +6,7 @@ REPO_NAME="${REPO_NAME:-gptimage2api}"
 BRANCH="main"
 INSTALL_DIR="${INSTALL_DIR:-/opt/gptimage2api}"
 PORT="${GPTIMAGE2API_PORT:-${PORT:-2080}}"
-THREAD_TOKENS="${GPTIMAGE2API_THREAD_TOKENS:-${THREAD_TOKENS:-120}}"
+THREAD_TOKENS="${GPTIMAGE2API_THREAD_TOKENS:-${THREAD_TOKENS:-0}}"
 BASE_URL="${GPTIMAGE2API_BASE_URL:-${BASE_URL:-}}"
 MODE="${MODE:-}"
 AUTH_KEY="${GPTIMAGE2API_AUTH_KEY:-${AUTH_KEY:-}}"
@@ -40,7 +40,7 @@ EOF
   INSTALL_DIR=/opt/gptimage2api
   PORT=2080
   GPTIMAGE2API_BASE_URL=https://your-domain.com
-  GPTIMAGE2API_THREAD_TOKENS=120
+  GPTIMAGE2API_THREAD_TOKENS=0
   MODE=docker|python
   AUTH_KEY=your-auth-key
   POSTGRES_PASSWORD=generated-automatically
@@ -53,7 +53,7 @@ EOF
   --mode docker|python
   --port 2080
   --base-url https://your-domain.com
-  --thread-tokens 120
+  --thread-tokens 0
   --install-dir /opt/gptimage2api
   --auth-key your-auth-key
   --postgres-password your-postgres-password
@@ -167,7 +167,7 @@ text() {
       err_mode) printf 'MODE must be docker or python.' ;;
       err_port) printf 'PORT must be a number.' ;;
       err_base_url) printf 'Image access URL must be an http or https address without query or fragment. Path must be empty or /images.' ;;
-      err_thread_tokens) printf 'GPTIMAGE2API_THREAD_TOKENS must be a positive number.' ;;
+      err_thread_tokens) printf 'GPTIMAGE2API_THREAD_TOKENS must be a non-negative integer. 0 means auto.' ;;
       err_postgres_password) printf 'POSTGRES_PASSWORD may only contain letters, numbers, underscores, and hyphens.' ;;
       err_frontend) printf 'npm is unavailable and no built frontend was found. Install Node.js/npm or provide web_dist/index.html.' ;;
       err_not_git) printf 'exists but is not a git repository.' ;;
@@ -250,7 +250,7 @@ text() {
     err_mode) printf '运行模式只能是 docker 或 python。' ;;
     err_port) printf '端口必须是数字。' ;;
     err_base_url) printf '图片访问地址必须是 http 或 https，不能带查询参数或片段，路径只能为空或 /images。' ;;
-    err_thread_tokens) printf 'GPTIMAGE2API_THREAD_TOKENS 必须是正整数。' ;;
+    err_thread_tokens) printf 'GPTIMAGE2API_THREAD_TOKENS 必须是大于等于 0 的整数，0 表示自动。' ;;
     err_postgres_password) printf 'POSTGRES_PASSWORD 只能包含字母、数字、下划线和连字符。' ;;
     err_frontend) printf '未找到 npm，且没有可用的前端构建结果。请安装 Node.js/npm，或提供 web_dist/index.html。' ;;
     err_not_git) printf '已存在，但不是 Git 仓库。' ;;
@@ -556,7 +556,7 @@ validate_inputs() {
     exit 1
   fi
 
-  if [[ -z "${THREAD_TOKENS}" || ! "${THREAD_TOKENS}" =~ ^[0-9]+$ || "${THREAD_TOKENS}" -lt 1 ]]; then
+  if [[ -z "${THREAD_TOKENS}" || ! "${THREAD_TOKENS}" =~ ^[0-9]+$ ]]; then
     echo "[$(text prefix_error)] $(text err_thread_tokens)" >&2
     exit 1
   fi
@@ -703,8 +703,8 @@ GPTIMAGE2API_GITHUB_REPOSITORY=$(dotenv_quote "${REPO_OWNER}/${REPO_NAME}")
 DATABASE_URL=$(dotenv_quote "${DATABASE_URL}")
 GPTIMAGE2API_IMAGE_QUEUE_DATABASE_URL=$(dotenv_quote "${IMAGE_QUEUE_DATABASE_URL}")
 GPTIMAGE2API_IMAGE_QUEUE_ARTIFACT_ROOT=$(dotenv_quote "data/images")
-GPTIMAGE2API_IMAGE_QUEUE_GENERATION_CONCURRENCY=$(dotenv_quote "4")
-GPTIMAGE2API_IMAGE_QUEUE_MAX_BACKLOG=$(dotenv_quote "256")
+GPTIMAGE2API_IMAGE_QUEUE_GENERATION_CONCURRENCY=$(dotenv_quote "0")
+GPTIMAGE2API_IMAGE_QUEUE_MAX_BACKLOG=$(dotenv_quote "50")
 
 DATABASE_MODE=$(dotenv_quote "${DATABASE_MODE}")
 POSTGRES_DB=$(dotenv_quote "${POSTGRES_DB}")
@@ -799,8 +799,8 @@ run_python() {
   export DATABASE_URL="${DATABASE_URL}"
   export GPTIMAGE2API_IMAGE_QUEUE_DATABASE_URL="${IMAGE_QUEUE_DATABASE_URL}"
   export GPTIMAGE2API_IMAGE_QUEUE_ARTIFACT_ROOT="data/images"
-  export GPTIMAGE2API_IMAGE_QUEUE_GENERATION_CONCURRENCY="4"
-  export GPTIMAGE2API_IMAGE_QUEUE_MAX_BACKLOG="256"
+  export GPTIMAGE2API_IMAGE_QUEUE_GENERATION_CONCURRENCY="0"
+  export GPTIMAGE2API_IMAGE_QUEUE_MAX_BACKLOG="50"
   export GPTIMAGE2API_GITHUB_REPOSITORY="${REPO_OWNER}/${REPO_NAME}"
   print_ready
   exec uv run uvicorn main:app --host 0.0.0.0 --port "${PORT}"

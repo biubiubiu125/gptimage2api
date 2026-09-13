@@ -7,7 +7,7 @@ from threading import Lock
 from typing import Any
 
 from services.call_view import build_call_summary
-from services.runtime_configuration import DEFAULT_THREAD_TOKENS, env_int
+from services.runtime_configuration import env_int
 from utils.timezone import beijing_from_timestamp, beijing_now_str
 
 
@@ -167,7 +167,7 @@ class RealtimeMonitorService:
         self._completed: deque[dict[str, Any]] = deque(maxlen=completed_limit)
         self._events: deque[dict[str, Any]] = deque(maxlen=event_limit)
         self._threadpool: dict[str, int] = {
-            "tokens": env_int("GPTIMAGE2API_THREAD_TOKENS", DEFAULT_THREAD_TOKENS),
+            "tokens": 0,
             "previous_tokens": 0,
         }
 

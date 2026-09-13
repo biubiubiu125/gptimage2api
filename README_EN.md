@@ -187,10 +187,14 @@ Available models depend on the upstream accounts and the current `/v1/models` re
 | `GPTIMAGE2API_AUTH_KEY` | Required | Administrator and default API key; the environment variable takes precedence over `config.json` |
 | `DATABASE_URL` | PostgreSQL | Application Database connection; defaults to `data/gptimage2api.db` when unset |
 | `GPTIMAGE2API_BASE_URL` | Current service URL | Public base URL used for generated image and file links |
-| `GPTIMAGE2API_THREAD_TOKENS` | `120` | Capacity for synchronous backend worker threads; accepts any positive integer, while accounts, proxies, and upstream services retain their own limits |
+| `GPTIMAGE2API_THREAD_TOKENS` | `0` | Door-thread capacity; `0` means auto (generation limit × 2). A positive integer overrides auto. Accounts, proxies, and upstream services keep their own limits |
 | `GPTIMAGE2API_IMAGE_QUEUE_DATABASE_URL` | Required | Separate PostgreSQL queue database for persistent image tasks |
-| `GPTIMAGE2API_IMAGE_QUEUE_GENERATION_CONCURRENCY` | `4` | Bound for queue worker concurrency |
-| `GPTIMAGE2API_IMAGE_QUEUE_MAX_BACKLOG` | `256` | Maximum queued image tasks |
+| `GPTIMAGE2API_IMAGE_QUEUE_GENERATION_CONCURRENCY` | `0` | Per-host generation concurrency; `0` means auto (`min(2000, max(300, cores×300))`) |
+| `GPTIMAGE2API_IMAGE_QUEUE_OCCUPANCY_PAUSE_PERCENT` | `90` | Pause new enqueue/generation/registration after CPU, memory, or swap stays at or above this percent for about 2.5 seconds |
+| `GPTIMAGE2API_IMAGE_QUEUE_OCCUPANCY_RESUME_PERCENT` | `80` | Resume after all three stay below this percent for about 2.5 seconds |
+| `GPTIMAGE2API_IMAGE_QUEUE_OCCUPANCY_HOLD_SECONDS` | `2.5` | How long occupancy must stay high or low before the gate flips |
+| `GPTIMAGE2API_IMAGE_QUEUE_ABSOLUTE_GUARD` | `0` | Process thread hard wall; `0` means auto |
+| `GPTIMAGE2API_IMAGE_QUEUE_MAX_BACKLOG` | `50` | Maximum queued image tasks |
 | `account_processing_concurrency` | `30` | Capacity for account imports, refreshes, synchronization, and batch processing |
 | `image_account_concurrency` | `1` | Per-account image concurrency, configurable from 1 to 3 |
 | `image_stream_timeout_secs` | `80` | Maximum wait for the upstream image SSE/HTTP stream |

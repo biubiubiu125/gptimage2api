@@ -14,6 +14,7 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from services.image_account_dispatch import AccountDispatchStats, rank_image_account_candidates
 from services.image_failure import image_failure, should_switch_image_account
 from services.image_queue.database import ImageQueueDatabase, ImageQueueUnavailableError
 from services.image_queue.models import (
@@ -116,6 +117,86 @@ def _as_utc(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _parse_utc_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return _as_utc(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return _as_utc(parsed)
+    return None
+
+
+def _stage_timing_started_at(timings: dict, name: str) -> datetime | None:
+    entry = timings.get(name)
+    if isinstance(entry, dict):
+        return _parse_utc_datetime(entry.get("started_at"))
+    return None
+
+
+def _dispatch_lease_started_at(
+    *,
+    stage: object,
+    stage_timings: object,
+    heartbeat_at: datetime | None,
+    job_started_at: datetime | None,
+) -> datetime | None:
+    timings = stage_timings if isinstance(stage_timings, dict) else {}
+    current = str(getattr(stage, "value", stage) or "").strip().lower()
+    started = None
+    if current == "resolving":
+        started = (
+            _stage_timing_started_at(timings, "generating")
+            or _stage_timing_started_at(timings, "leased")
+            or _stage_timing_started_at(timings, "resolving")
+        )
+    elif current in {"generating", "leased"}:
+        started = _stage_timing_started_at(timings, current)
+        if started is None and current == "generating":
+            started = _stage_timing_started_at(timings, "leased")
+    elif current:
+        started = _stage_timing_started_at(timings, current) or _stage_timing_started_at(
+            timings,
+            str(stage or ""),
+        )
+    if started is not None:
+        return started
+    started = _parse_utc_datetime(job_started_at)
+    if started is not None:
+        return started
+    return _parse_utc_datetime(heartbeat_at)
+
+
+def apply_claim_stage_timings(
+    timings: object,
+    *,
+    previous_stage: object,
+    next_stage: object,
+    stamp: datetime | str,
+) -> dict[str, Any]:
+    current = dict(timings) if isinstance(timings, dict) else {}
+    previous = str(getattr(previous_stage, "value", previous_stage) or "").strip()
+    nxt = str(getattr(next_stage, "value", next_stage) or "").strip()
+    stamp_text = stamp.isoformat() if isinstance(stamp, datetime) else str(stamp)
+    if previous and previous != nxt:
+        entry = dict(current.get(previous) or {})
+        entry.setdefault("started_at", stamp_text)
+        entry["ended_at"] = stamp_text
+        current[previous] = entry
+    if nxt:
+        entry = dict(current.get(nxt) or {})
+        if previous != nxt or not str(entry.get("started_at") or "").strip():
+            entry["started_at"] = stamp_text
+        entry.pop("ended_at", None)
+        current[nxt] = entry
+    return current
 
 
 def _snapshot_text(snapshot: dict[str, Any], key: str) -> str:
@@ -337,6 +418,17 @@ def claimable_job_statement(
             JobStage.RETRY_WAIT.value,
         ]))
     return statement
+
+
+def refund_occupancy_claim_attempt(job: Any) -> None:
+    stage = getattr(job, "stage", "")
+    value = stage.value if isinstance(stage, JobStage) else str(stage or "")
+    if value in {JobStage.DOWNLOADING.value, JobStage.RESOLVING.value}:
+        job.download_attempts = max(0, int(getattr(job, "download_attempts", 0) or 0) - 1)
+    elif value in {JobStage.TRANSFORMING.value, JobStage.SAVING.value}:
+        job.save_attempts = max(0, int(getattr(job, "save_attempts", 0) or 0) - 1)
+    else:
+        job.generate_attempts = max(0, int(getattr(job, "generate_attempts", 0) or 0) - 1)
 
 
 class ImageQueueRepository:
@@ -698,6 +790,57 @@ class ImageQueueRepository:
             return int(session.execute(statement).scalar_one())
         with self.database.session() as session_obj:
             return int(session_obj.execute(statement).scalar_one())
+
+    @staticmethod
+    def _account_lease_occupies_slot(now: datetime):
+        return or_(
+            ImageAccountLease.expires_at > now,
+            ImageAccountLease.job_id.in_(
+                select(ImageJob.id).where(
+                    ImageJob.status.in_([JobStatus.LEASED.value, JobStatus.RUNNING.value])
+                )
+            ),
+        )
+
+    def count_account_leases(
+        self,
+        session: Session | None = None,
+        account_ids: Iterable | None = None,
+    ) -> int:
+        ids: list[UUID] | None = None
+        if account_ids is not None:
+            ids = []
+            seen: set[UUID] = set()
+            for item in account_ids:
+                if item is None:
+                    continue
+                try:
+                    account_id = item if isinstance(item, UUID) else UUID(str(item))
+                except (TypeError, ValueError):
+                    continue
+                if account_id in seen:
+                    continue
+                seen.add(account_id)
+                ids.append(account_id)
+            if not ids:
+                return 0
+        now = utc_now()
+        statement = (
+            select(func.count())
+            .select_from(ImageAccountLease)
+            .where(ImageQueueRepository._account_lease_occupies_slot(now))
+        )
+        if ids is not None:
+            statement = statement.where(ImageAccountLease.account_id.in_(ids))
+        if session is not None:
+            return int(session.execute(statement).scalar_one() or 0)
+        with self.database.session() as session_obj:
+            return int(session_obj.execute(statement).scalar_one() or 0)
+
+    def reclaim_expired_inactive_account_leases(self, now: datetime | None = None) -> int:
+        stamp = now or utc_now()
+        with self.database.session() as session:
+            return int(self._clear_expired_inactive_account_leases(session, now=stamp) or 0)
 
     def enqueue_task(self, request: EnqueueRequest, *, max_backlog: int | None = None) -> EnqueueResult:
         if not str(request.owner_key or "").strip():
@@ -1366,8 +1509,8 @@ class ImageQueueRepository:
         session: Session,
         *,
         now: datetime,
-    ) -> None:
-        session.execute(delete(ImageAccountLease).where(
+    ) -> int:
+        result = session.execute(delete(ImageAccountLease).where(
             ImageAccountLease.expires_at <= now,
             ImageAccountLease.job_id.in_(
                 select(ImageJob.id).where(ImageJob.status.not_in([
@@ -1376,6 +1519,61 @@ class ImageQueueRepository:
                 ]))
             ),
         ))
+        return int(getattr(result, "rowcount", 0) or 0)
+
+    @staticmethod
+    def _dispatch_stats_for_candidates(
+        session: Session,
+        candidates: Sequence[ImageAccountCandidate],
+        now: datetime,
+    ) -> dict[UUID, AccountDispatchStats]:
+        stats = {
+            candidate.account_id: AccountDispatchStats(
+                success=int(candidate.success or 0),
+                fail=int(candidate.fail or 0),
+            )
+            for candidate in candidates
+        }
+        if not stats:
+            return stats
+        rows = session.execute(
+            select(
+                ImageAccountLease.account_id,
+                ImageAccountLease.heartbeat_at,
+                ImageJob.started_at,
+                ImageJob.stage,
+                ImageJob.stage_timings,
+            )
+            .select_from(ImageAccountLease)
+            .outerjoin(ImageJob, ImageJob.id == ImageAccountLease.job_id)
+            .where(ImageAccountLease.account_id.in_(tuple(stats)))
+            .where(ImageQueueRepository._account_lease_occupies_slot(now))
+        ).all()
+        inflight: dict[UUID, int] = {}
+        generating: dict[UUID, float] = {}
+        current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        for account_id, heartbeat_at, job_started_at, stage, stage_timings in rows:
+            inflight[account_id] = inflight.get(account_id, 0) + 1
+            started = _dispatch_lease_started_at(
+                stage=stage,
+                stage_timings=stage_timings,
+                heartbeat_at=heartbeat_at,
+                job_started_at=job_started_at,
+            )
+            if started is None:
+                continue
+            generating[account_id] = max(
+                generating.get(account_id, 0.0),
+                (current - started).total_seconds(),
+            )
+        for account_id, current_stats in stats.items():
+            stats[account_id] = AccountDispatchStats(
+                inflight=inflight.get(account_id, 0),
+                generating_seconds=generating.get(account_id, 0.0),
+                success=current_stats.success,
+                fail=current_stats.fail,
+            )
+        return stats
 
     @staticmethod
     def _acquire_account_slot(
@@ -1691,6 +1889,13 @@ class ImageQueueRepository:
                     restricted_candidates = True
                     candidates = [candidate for candidate in candidates if candidate.account_id != job.account_id]
                 if not local_recovery and not accountless_recovery:
+                    if len(candidates) > 1:
+                        candidates = rank_image_account_candidates(
+                            candidates,
+                            self._dispatch_stats_for_candidates(session, candidates, claim_time),
+                            account_concurrency=account_concurrency,
+                            rotate=int(job.id.int),
+                        )
                     for candidate in candidates:
                         slot_no = self._acquire_account_slot(
                             session,
@@ -1731,17 +1936,12 @@ class ImageQueueRepository:
                     save_attempts += 1
                 else:
                     generate_attempts += 1
-                timings = dict(job.stage_timings or {})
-                stamp = claim_time.isoformat()
-                if previous_stage and previous_stage != next_stage:
-                    entry = dict(timings.get(previous_stage) or {})
-                    entry.setdefault("started_at", stamp)
-                    entry["ended_at"] = stamp
-                    timings[previous_stage] = entry
-                entry = dict(timings.get(next_stage) or {})
-                entry.setdefault("started_at", stamp)
-                entry.pop("ended_at", None)
-                timings[next_stage] = entry
+                timings = apply_claim_stage_timings(
+                    job.stage_timings,
+                    previous_stage=previous_stage,
+                    next_stage=next_stage,
+                    stamp=claim_time,
+                )
 
                 # Atomic ownership transfer: works on PostgreSQL SKIP LOCKED and
                 # also prevents SQLite double-claim because only one UPDATE wins.
@@ -1821,8 +2021,6 @@ class ImageQueueRepository:
             ImageJob.lease_token == claim.lease_token,
             ImageJob.lease_version == claim.lease_version,
             ImageJob.lease_owner == claim.lease_owner,
-            ImageJob.lease_expires_at.is_not(None),
-            ImageJob.lease_expires_at > utc_now(),
         )
         if lock:
             statement = statement.with_for_update()
@@ -1909,21 +2107,12 @@ class ImageQueueRepository:
         next_stage: str,
         now: datetime,
     ) -> None:
-        timings = dict(job.stage_timings or {})
-        previous = str(previous_stage or "").strip()
-        nxt = str(next_stage or "").strip()
-        stamp = now.isoformat()
-        if previous and previous != nxt:
-            entry = dict(timings.get(previous) or {})
-            entry.setdefault("started_at", stamp)
-            entry["ended_at"] = stamp
-            timings[previous] = entry
-        if nxt:
-            entry = dict(timings.get(nxt) or {})
-            entry.setdefault("started_at", stamp)
-            entry.pop("ended_at", None)
-            timings[nxt] = entry
-        job.stage_timings = timings
+        job.stage_timings = apply_claim_stage_timings(
+            job.stage_timings,
+            previous_stage=previous_stage,
+            next_stage=next_stage,
+            stamp=now,
+        )
 
     def mark_quota_consumed(self, claim: ClaimedJob) -> bool:
         with self.database.session() as session:
@@ -2050,7 +2239,6 @@ class ImageQueueRepository:
                     ImageJob.lease_owner == worker_id,
                     ImageJob.lease_token == claim.lease_token,
                     ImageJob.lease_version == claim.lease_version,
-                    ImageJob.lease_expires_at > heartbeat_at,
                 ).values(heartbeat_at=heartbeat_at, lease_expires_at=expires_at))
                 if int(result.rowcount or 0) != 1:
                     continue
@@ -2058,7 +2246,6 @@ class ImageQueueRepository:
                     ImageAccountLease.job_id == claim.job.id,
                     ImageAccountLease.lease_token == claim.lease_token,
                     ImageAccountLease.lease_version == claim.lease_version,
-                    ImageAccountLease.expires_at > heartbeat_at,
                 ).values(heartbeat_at=heartbeat_at, expires_at=expires_at))
                 updated += 1
         return updated
@@ -2808,7 +2995,7 @@ class ImageQueueRepository:
             self._aggregate_task(session, task)
             return self._task_snapshot(session, task)
 
-    def release_claim(self, claim: ClaimedJob) -> bool:
+    def release_claim(self, claim: ClaimedJob, *, refund_attempt: bool = False) -> bool:
         with self.database.session() as session:
             job, task = self._claimed_job_and_task(session, claim)
             if job is None:
@@ -2828,6 +3015,8 @@ class ImageQueueRepository:
                     to_status=job.status,
                 )
             else:
+                if refund_attempt:
+                    refund_occupancy_claim_attempt(job)
                 # Preserve checkpoint stage so a temporary capacity release does
                 # not force a full re-generation.
                 job.status = JobStatus.QUEUED.value
@@ -3367,7 +3556,9 @@ class ImageQueueRepository:
                 "queue_wait_p90_seconds": self._percentile_seconds(queue_wait_samples, 0.90),
                 "duration_p90_seconds": self._percentile_seconds(duration_samples, 0.90),
                 "active_leases": int(session.execute(
-                    select(func.count()).select_from(ImageAccountLease).where(ImageAccountLease.expires_at > now)
+                    select(func.count()).select_from(ImageAccountLease).where(
+                        ImageQueueRepository._account_lease_occupies_slot(now)
+                    )
                 ).scalar_one()),
                 "unacknowledged_success": int(session.execute(
                     select(func.count(ImageTask.id)).where(
@@ -4608,8 +4799,6 @@ class ImageQueueRepository:
                             .where(
                                 ImageJob.lease_owner == worker_id,
                                 ImageJob.status.in_([JobStatus.LEASED.value, JobStatus.RUNNING.value]),
-                                ImageJob.lease_expires_at.is_not(None),
-                                ImageJob.lease_expires_at > now,
                             )
                         ).scalar_one())
                         active_account_claims = int(session.execute(
@@ -4617,7 +4806,7 @@ class ImageQueueRepository:
                             .select_from(ImageAccountLease)
                             .where(
                                 ImageAccountLease.lease_owner == worker_id,
-                                ImageAccountLease.expires_at > now,
+                                ImageQueueRepository._account_lease_occupies_slot(now),
                             )
                         ).scalar_one())
                         active_claims = max(active_job_claims, active_account_claims)

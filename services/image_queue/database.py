@@ -947,10 +947,14 @@ class ImageQueueDatabase:
         if self.engine is None:
             return 100.0
         pool = self.engine.pool
-        size = int(getattr(pool, "size", lambda: 0)() or 0)
-        overflow = int(getattr(pool, "overflow", lambda: 0)() or 0)
+        size = int(getattr(self.settings, "database_pool_size", 0) or 0)
+        if size <= 0:
+            size = int(getattr(pool, "size", lambda: 0)() or 0)
+        max_overflow = int(getattr(self.settings, "database_max_overflow", 0) or 0)
+        if max_overflow < 0:
+            max_overflow = int(getattr(pool, "_max_overflow", 0) or 0)
         checked_out = int(getattr(pool, "checkedout", lambda: 0)() or 0)
-        capacity = max(1, size + max(0, overflow))
+        capacity = max(1, size + max(0, max_overflow))
         return min(100.0, checked_out * 100.0 / capacity)
 
     def dispose(self) -> None:

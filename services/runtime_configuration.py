@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 
 
-DEFAULT_THREAD_TOKENS = 120
+DEFAULT_THREAD_TOKENS = 0
 
 
 def _env_candidates(name: str, legacy_names: tuple[str, ...]) -> tuple[str, ...]:
@@ -34,3 +34,20 @@ def env_int(name: str, default: int, minimum: int = 1, maximum: int | None = Non
     if maximum is not None:
         value = min(value, maximum)
     return value
+
+
+def resolve_thread_tokens(*, cpu_cores: int | None = None) -> int:
+    raw = env_value(
+        "GPTIMAGE2API_THREAD_TOKENS",
+        "CHATGPT2API_THREAD_TOKENS",
+        default=str(DEFAULT_THREAD_TOKENS),
+    )
+    try:
+        parsed = int(str(raw).strip() or "0")
+    except (TypeError, ValueError):
+        parsed = 0
+    if parsed > 0:
+        return parsed
+    from services.image_queue.settings import resolve_generation_concurrency_limit
+
+    return max(1, resolve_generation_concurrency_limit(cpu_cores=cpu_cores) * 2)

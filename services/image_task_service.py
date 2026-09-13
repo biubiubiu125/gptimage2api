@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import inspect
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 import time
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
@@ -32,7 +32,11 @@ from services.image_queue.idempotency import (
     select_idempotency_key,
 )
 from services.image_queue.repository import IdempotencyConflict, ImageQueueRepository
-from services.image_queue.resource_controller import ImageQueueResourcePressureError, ImageQueueStorageFullError
+from services.image_queue.resource_controller import (
+    ImageQueueResourcePressureError,
+    ImageQueueStorageFullError,
+    ResourceController,
+)
 from services.image_queue.sanitization import (
     safe_queue_error_message,
     sanitize_delivery_url,
@@ -182,6 +186,8 @@ class ImageTaskService:
         self.backend_factory = backend_factory
         self._owns_database = database is None
         self._started = False
+        self._fallback_resource_controller = None
+        self._fallback_resource_lock = RLock()
         self._startup_error: Exception | None = None
         self._waiters_lock = Lock()
         self._terminal_waiters: dict[str, set[tuple[asyncio.AbstractEventLoop, asyncio.Event]]] = {}
@@ -530,6 +536,7 @@ class ImageTaskService:
                     account_service,
                     self.execute_claim,
                     self.settings,
+                    resource_controller=self._resource_controller_for_worker(),
                     state_change_callback=self._handle_task_state_change,
                     local_recovery_callback=self._run_worker_maintenance,
                     local_recovery_available_callback=self.local_recovery_artifacts_available,
@@ -1419,15 +1426,155 @@ class ImageTaskService:
             return submit(operation).result()
         return operation()
 
-    def _ensure_submission_capacity(self) -> None:
-        controller = getattr(self.worker, "resource_controller", None)
+    def _resource_controller(self):
+        worker = getattr(self, "worker", None)
+        controller = getattr(worker, "resource_controller", None)
+        if controller is not None:
+            return controller
+        fallback = getattr(self, "_fallback_resource_controller", None)
+        if fallback is not None:
+            return fallback
+        lock = getattr(self, "_fallback_resource_lock", None)
+        if lock is None:
+            lock = RLock()
+            self._fallback_resource_lock = lock
+        with lock:
+            fallback = getattr(self, "_fallback_resource_controller", None)
+            if fallback is not None:
+                return fallback
+            try:
+                from services.image_queue.resource_controller import ResourceController
+
+                settings = getattr(self, "_settings", None)
+                fallback = ResourceController.from_runtime(
+                    settings=settings,
+                    database=getattr(self, "database", None),
+                )
+                if settings is None and hasattr(self, "_settings"):
+                    self._settings = fallback.settings
+            except Exception:
+                return None
+            self._fallback_resource_controller = fallback
+            return fallback
+
+    def _resource_controller_for_worker(self):
+        controller = self._resource_controller()
         if controller is None:
-            return
-        decision = controller.allow_new_submission(controller.sample())
+            return None
+        if getattr(controller, "database", None) is None:
+            database = getattr(self, "database", None)
+            if database is not None:
+                controller.database = database
+        return controller
+
+    def _ensure_submission_capacity(self) -> None:
+        controller = self._resource_controller()
+        if controller is None:
+            raise ImageQueueResourcePressureError("resource_pressure")
+        decision = controller.allow_new_submission()
         if not decision.allowed:
             if decision.reason == "resource_disk":
                 raise ImageQueueStorageFullError()
             raise ImageQueueResourcePressureError(decision.reason or "resource_pressure")
+
+    def _live_generation_gate(self, controller: Any) -> tuple[bool, str, Any]:
+        occupancy_paused = True
+        pause_reason = "resource_pressure"
+        generation = None
+        if controller is None:
+            return occupancy_paused, pause_reason, generation
+        try:
+            evaluate = getattr(controller, "evaluate", None)
+            if callable(evaluate):
+                evaluated = evaluate()
+                if isinstance(evaluated, tuple) and len(evaluated) >= 2:
+                    generation = evaluated[1]
+            else:
+                allow = getattr(controller, "allow_new_generation", None)
+                if callable(allow):
+                    generation = allow()
+        except Exception:
+            return True, "resource_pressure", None
+        occupancy_paused = bool(getattr(controller, "occupancy_paused", False))
+        pause_reason = str(getattr(controller, "occupancy_pause_reason", "") or "")
+        if occupancy_paused and not pause_reason:
+            pause_reason = "resource_occupancy"
+        if (
+            not occupancy_paused
+            and generation is not None
+            and not bool(getattr(generation, "allowed", True))
+        ):
+            pause_reason = str(getattr(generation, "reason", "") or pause_reason or "resource_pressure")
+        return occupancy_paused, pause_reason, generation
+
+    def _queue_capacity_view_without_worker(self) -> dict[str, object]:
+        occupancy_paused, pause_reason, _generation = self._live_generation_gate(
+            self._resource_controller()
+        )
+        settings = getattr(self, "_settings", None)
+        if settings is None:
+            settings = getattr(self, "settings", None)
+        try:
+            generation_limit = int(getattr(settings, "generation_concurrency_limit", 0) or 0)
+        except (TypeError, ValueError):
+            generation_limit = 0
+        return {
+            "generation_limit": generation_limit,
+            "current_generation": 0,
+            "remaining_account_slots": 0,
+            "available_accounts": 0,
+            "occupancy_paused": occupancy_paused,
+            "pause_reason": pause_reason,
+            "effective_generation": 0,
+        }
+
+    def queue_capacity_view(self) -> dict[str, object]:
+        worker = getattr(self, "worker", None)
+        if worker is None:
+            return self._queue_capacity_view_without_worker()
+        lock = getattr(worker, "_lock", None)
+        if lock is not None:
+            with lock:
+                snap = dict(getattr(worker, "_worker_state_snapshot", None) or {})
+                pause_reason = str(getattr(worker, "_worker_state_pause_reason", "") or "")
+        else:
+            snap = dict(getattr(worker, "_worker_state_snapshot", None) or {})
+            pause_reason = str(getattr(worker, "_worker_state_pause_reason", "") or "")
+        generation_limit = int(
+            snap.get("generation_concurrency_limit")
+            or getattr(getattr(worker, "settings", None), "generation_concurrency_limit", 0)
+            or 0
+        )
+        current_generation = int(snap.get("current_generation_concurrency") or 0)
+        remaining_slots = int(snap.get("remaining_account_slots") or 0)
+        available_accounts = int(snap.get("available_account_count") or 0)
+        occupancy_paused = bool(snap.get("occupancy_paused"))
+        pause_reason = pause_reason or str(snap.get("pause_reason") or "")
+        controller = getattr(worker, "resource_controller", None)
+        if controller is not None:
+            live_paused, live_reason, _generation = self._live_generation_gate(controller)
+            occupancy_paused = live_paused
+            if live_reason:
+                pause_reason = live_reason
+            elif live_paused:
+                pause_reason = pause_reason or "resource_occupancy"
+        if occupancy_paused or ResourceController.generation_gate_closed(False, pause_reason):
+            effective = 0
+        elif "effective_generation" in snap:
+            effective = int(snap.get("effective_generation") or 0)
+        elif generation_limit:
+            effective = min(generation_limit, remaining_slots)
+        else:
+            effective = 0
+        return {
+            "generation_limit": generation_limit,
+            "current_generation": current_generation,
+            "remaining_account_slots": remaining_slots,
+            "available_accounts": available_accounts,
+            "occupancy_paused": occupancy_paused,
+            "pause_reason": pause_reason,
+            "effective_generation": effective,
+        }
 
     def _ensure_backlog_capacity(self, repository: ImageQueueRepository) -> None:
         max_backlog = max(1, int(getattr(self.settings, "max_backlog", 0) or 0))
@@ -2492,6 +2639,7 @@ class ImageTaskService:
             input_artifacts=input_artifacts,
         )
         try:
+            self._ensure_submission_capacity()
             if self._enqueue_accepts_max_backlog(repository):
                 result = repository.enqueue_task(request, max_backlog=self.settings.max_backlog)
             else:

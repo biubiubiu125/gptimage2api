@@ -29,6 +29,7 @@ from services.account_operation_events import (
 )
 from services.browser_fingerprint import CHROME146_IMPERSONATE, CHROME146_USER_AGENT
 from services.config import config
+from services.image_account_dispatch import AccountDispatchStats, rank_image_account_tokens
 from services.image_failure import ImageFailure, classify_image_exception, image_failure
 from services.http_target import build_http_target_request_options
 from services.log_service import (
@@ -167,6 +168,7 @@ class AccountService:
         self._accounts = self._load_accounts()
         self._account_snapshot_checked_at = time.monotonic()
         self._image_inflight: dict[str, int] = {}
+        self._image_started_at: dict[str, deque[float]] = {}
         self._image_failure_refresh_lock = Lock()
         self._image_failure_refresh_active: set[str] = set()
         self._image_failure_refresh_active_scopes: dict[str, str] = {}
@@ -760,6 +762,7 @@ class AccountService:
             return
         for token in removed_tokens:
             self._image_inflight.pop(token, None)
+            self._image_started_at.pop(token, None)
         self._token_aliases = {
             source: target
             for source, target in self._token_aliases.items()
@@ -1439,6 +1442,16 @@ class AccountService:
             self._image_inflight[new_token] = (
                 int(self._image_inflight.get(new_token, 0)) + old_inflight
             )
+        merged: deque[float] = deque()
+        for source in alias_sources:
+            if source == new_token:
+                continue
+            merged.extend(self._image_start_values(self._image_started_at.pop(source, None)))
+        merged.extend(self._image_start_values(self._image_started_at.get(new_token)))
+        if merged:
+            self._image_started_at[new_token] = deque(sorted(float(item) for item in merged))
+        else:
+            self._image_started_at.pop(new_token, None)
 
         with self._image_failure_refresh_lock:
             old_scopes = [
@@ -1949,6 +1962,68 @@ class AccountService:
             if int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
 
+    @staticmethod
+    def _image_start_values(started: object) -> list[float]:
+        if started is None:
+            return []
+        if isinstance(started, (deque, list, tuple)):
+            return [float(item) for item in started]
+        return [float(started)]
+
+    def _record_image_slot_start_locked(self, access_token: str) -> None:
+        now = time.monotonic()
+        starts = self._image_started_at.get(access_token)
+        if starts is None:
+            self._image_started_at[access_token] = deque([now])
+            return
+        if isinstance(starts, deque):
+            starts.append(now)
+            return
+        self._image_started_at[access_token] = deque(self._image_start_values(starts) + [now])
+
+    def _pop_image_slot_start_locked(self, access_token: str) -> None:
+        starts = self._image_started_at.get(access_token)
+        if starts is None:
+            return
+        remaining = self._image_start_values(starts)[1:]
+        if remaining:
+            self._image_started_at[access_token] = deque(remaining)
+            return
+        self._image_started_at.pop(access_token, None)
+
+    def _image_generating_seconds_locked(self, access_token: str, inflight: int) -> float:
+        if inflight <= 0:
+            return 0.0
+        starts = self._image_start_values(self._image_started_at.get(access_token))
+        if not starts:
+            return 0.0
+        return max(0.0, time.monotonic() - float(starts[0]))
+
+    def _dispatch_stats_for_token_locked(self, access_token: str) -> AccountDispatchStats:
+        account = self._accounts.get(access_token) or {}
+        inflight = int(self._image_inflight.get(access_token, 0))
+        generating = self._image_generating_seconds_locked(access_token, inflight)
+        return AccountDispatchStats(
+            inflight=inflight,
+            generating_seconds=generating,
+            success=int(account.get("success") or 0),
+            fail=int(account.get("fail") or 0),
+        )
+
+    def _pick_ranked_image_token_locked(self, tokens: list[str]) -> str:
+        rotate = int(self._index)
+        self._index += 1
+        ranked = rank_image_account_tokens(
+            tokens,
+            {
+                token: self._dispatch_stats_for_token_locked(token)
+                for token in tokens
+            },
+            account_concurrency=max(1, int(config.image_account_concurrency or 1)),
+            rotate=rotate,
+        )
+        return ranked[0]
+
     def _acquire_next_candidate_token(
             self,
             excluded_tokens: set[str] | None = None,
@@ -1996,8 +2071,8 @@ class AccountService:
                     plan_types,
                 )
                 if tokens:
-                    access_token = tokens[self._index % len(tokens)]
-                    self._index += 1
+                    access_token = self._pick_ranked_image_token_locked(tokens)
+                    self._record_image_slot_start_locked(access_token)
                     self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
                     return access_token
                 self._image_slot_condition.wait(
@@ -2063,8 +2138,10 @@ class AccountService:
         current_inflight = int(self._image_inflight.get(access_token, 0))
         if current_inflight <= 1:
             self._image_inflight.pop(access_token, None)
+            self._image_started_at.pop(access_token, None)
         else:
             self._image_inflight[access_token] = current_inflight - 1
+            self._pop_image_slot_start_locked(access_token)
 
     def get_available_access_token(
             self,
@@ -2331,7 +2408,7 @@ class AccountService:
 
     def list_image_account_candidates(self) -> list[Any]:
         """Return queue-facing account candidates without borrowing request slots."""
-        self._refresh_accounts_snapshot_if_stale(wait_for_refresh=True)
+        self._refresh_accounts_snapshot_if_stale(wait_for_refresh=False)
         from services.image_queue.types import ImageAccountCandidate
 
         with self._image_slot_condition:
@@ -2350,6 +2427,8 @@ class AccountService:
                         access_token=access_token,
                         plan_type=str(account.get("type") or ""),
                         source_type=str(account.get("source_type") or ""),
+                        success=int(account.get("success") or 0),
+                        fail=int(account.get("fail") or 0),
                     )
                 )
             return candidates
@@ -4234,15 +4313,16 @@ class AccountService:
                         next_item["status"] = "正常"
                         next_item["image_quota_unknown"] = True
                         next_item["restore_at"] = None
-                if not success and failure is not None and failure.verify_account:
+                if not success:
                     next_item["fail"] = int(next_item.get("fail") or 0) + 1
-                    self._mark_remote_check_pending(
-                        next_item,
-                        "image_failure",
-                        now.isoformat(),
-                        scope="image",
-                    )
-                    should_verify_after_failure = True
+                    if failure is not None and failure.verify_account:
+                        self._mark_remote_check_pending(
+                            next_item,
+                            "image_failure",
+                            now.isoformat(),
+                            scope="image",
+                        )
+                        should_verify_after_failure = True
                 account = self._normalize_account(next_item)
                 if account is None:
                     return None

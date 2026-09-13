@@ -196,6 +196,8 @@ class ImageAccountCandidate:
     access_token: str
     plan_type: str = ""
     source_type: str = ""
+    success: int = 0
+    fail: int = 0
 
 
 @dataclass(frozen=True)
@@ -211,6 +213,8 @@ class ResourceSnapshot:
     disk_free_bytes: int
     disk_free_percent: float
     sampled_at: datetime
+    swap_used_percent: float = 0.0
+    swap_total_bytes: int = 0
 
 
 @dataclass(frozen=True)
