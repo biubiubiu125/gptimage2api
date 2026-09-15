@@ -390,21 +390,26 @@ class BackupService:
                 self._restore_active = True
                 before = getattr(self, "_restore_before_hook", None)
                 after = getattr(self, "_restore_after_hook", None)
+            succeeded = False
             try:
                 if callable(before):
                     before()
                 yield
+                succeeded = True
             except BackupError:
                 raise
             except Exception as exc:
-                raise BackupError(f"恢复维护准备失败：{exc}") from exc
+                raise BackupError(str(exc)) from exc
             finally:
                 try:
-                    if callable(after):
+                    if succeeded and callable(after):
                         after()
                 finally:
                     with service_lock:
                         self._restore_active = False
+
+    def is_restore_active(self) -> bool:
+        return bool(getattr(self, "_restore_active", False))
 
     def _recover_interrupted_execution(self) -> None:
         try:
@@ -606,6 +611,12 @@ class BackupService:
             if not database_source.is_file():
                 raise BackupError(f"备份缺少 Application Database：{database_name}")
 
+            queue_settings = metadata.get("image_queue_database")
+            queue_included = isinstance(queue_settings, dict) and bool(queue_settings.get("included"))
+            queue_source = staging / "data/image-queue.pgdump"
+            if queue_included and not queue_source.is_file():
+                raise BackupError("备份 metadata 声明包含队列库，但缺少队列快照")
+
             restored: dict[str, bool] = {
                 "application_database": False,
                 "image_tasks": False,
@@ -614,6 +625,15 @@ class BackupService:
                 "image_queue": False,
                 "registration": False,
             }
+            self._guard_image_queue_restore()
+            if queue_included:
+                queue_database_url = self._image_queue_database_url()
+                self._restore_postgresql_database(
+                    queue_source,
+                    queue_database_url,
+                    "Image Queue Store",
+                )
+                restored["image_queue"] = True
             if database_backend == "sqlite":
                 self._restore_sqlite_database(database_source, self._repository.database_url)
             elif database_backend == "postgresql":
@@ -644,19 +664,6 @@ class BackupService:
             if images_source.is_dir():
                 self._restore_directory(images_source, config.images_dir)
                 restored["images"] = True
-
-            queue_settings = metadata.get("image_queue_database")
-            if isinstance(queue_settings, dict) and bool(queue_settings.get("included")):
-                queue_source = staging / "data/image-queue.pgdump"
-                if not queue_source.is_file():
-                    raise BackupError("备份 metadata 声明包含 Image Queue Store，但缺少队列快照")
-                queue_database_url = self._image_queue_database_url()
-                self._restore_postgresql_database(
-                    queue_source,
-                    queue_database_url,
-                    "Image Queue Store",
-                )
-                restored["image_queue"] = True
 
             registration_settings = metadata.get("registration_state")
             if isinstance(registration_settings, dict) and bool(registration_settings.get("included")):
@@ -809,8 +816,22 @@ class BackupService:
         for suffix in ("-wal", "-shm"):
             Path(f"{target}{suffix}").unlink(missing_ok=True)
 
+    def _guard_image_queue_restore(self) -> None:
+        from services.image_task_service import image_task_service
+
+        has_active = getattr(image_task_service, "has_active_claims", None)
+        if callable(has_active) and has_active():
+            raise BackupError("图片队列仍有未完成领取，无法恢复备份")
+        live_workers = getattr(image_task_service, "has_live_queue_workers", None)
+        if callable(live_workers) and live_workers():
+            raise BackupError("图片队列仍有存活工作进程，无法恢复备份")
+        dispose = getattr(image_task_service, "dispose_database", None)
+        if callable(dispose):
+            dispose()
+
     @staticmethod
     def _restore_postgresql_database(source: Path, database_url: str, label: str) -> None:
+        dispose_all_database_engines()
         url = make_url(database_url)
         command = [
             "pg_restore",

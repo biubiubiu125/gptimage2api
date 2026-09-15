@@ -15,8 +15,11 @@ class ImageRecovery:
     def __init__(self, repository: ImageQueueRepository) -> None:
         self.repository = repository
 
-    def recover(self, now: datetime | None = None) -> RecoverySummary:
-        reclaimed = self.repository.reclaim_expired_leases(now)
+    def recover(self, now: datetime | None = None, *, reclaim_restored: bool = False) -> RecoverySummary:
+        if reclaim_restored:
+            reclaimed = self.repository.reclaim_restored_leases(now)
+        else:
+            reclaimed = self.repository.reclaim_expired_leases(now)
         resumed_downloads = 0
         resumed_generation = 0
         for job in self.repository.list_recoverable_jobs():

@@ -18,8 +18,6 @@ MAX_GENERATION_CONCURRENCY_HARD_CAP = 99999
 MAX_ABSOLUTE_GUARD = 99999
 AUTO_GENERATION_CONCURRENCY_FLOOR = 300
 AUTO_GENERATION_CONCURRENCY_PER_CORE = 300
-AUTO_GENERATION_CONCURRENCY_CAP = 2000
-ESTIMATED_GENERATION_MEMORY_BYTES = 384 * 1024**2
 FALLBACK_AVAILABLE_MEMORY_BYTES = 8 * 1024**3
 DEFAULT_PROMPT_SUFFIX = (
     "请直接生成最终图片，只输出图片结果，不要回复解释、拒绝说明、文字描述或 Markdown。"
@@ -169,15 +167,6 @@ def _detected_available_memory_bytes() -> int:
     return max(1, min(physical_available, max(0, cgroup_limit - cgroup_current)))
 
 
-def _runtime_image_concurrency_limit() -> int:
-    try:
-        runtime = config.get_runtime_capacity_settings()
-        value = int(runtime.get("image_concurrency_limit") or 2000)
-    except Exception:
-        value = 2000
-    return max(1, value)
-
-
 def _estimated_worker_floor_threads(cpu_cores: int) -> int:
     cpu_cores = max(1, int(cpu_cores))
     recovery = max(4, min(32, cpu_cores * 2))
@@ -193,13 +182,14 @@ def _adaptive_generation_concurrency_default(
     available_memory_bytes: int | None = None,
 ) -> int:
     del available_memory_bytes
-    runtime_limit = max(1, int(runtime_limit or _runtime_image_concurrency_limit()))
     cpu_cores = max(1, int(cpu_cores or _detected_cpu_cores()))
-    auto_limit = min(
-        AUTO_GENERATION_CONCURRENCY_CAP,
-        max(AUTO_GENERATION_CONCURRENCY_FLOOR, cpu_cores * AUTO_GENERATION_CONCURRENCY_PER_CORE),
+    auto_limit = max(
+        AUTO_GENERATION_CONCURRENCY_FLOOR,
+        cpu_cores * AUTO_GENERATION_CONCURRENCY_PER_CORE,
     )
-    return max(1, min(runtime_limit, auto_limit))
+    if runtime_limit is None:
+        return max(1, auto_limit)
+    return max(1, min(int(runtime_limit), auto_limit))
 
 
 def resolve_generation_concurrency_limit(*, cpu_cores: int | None = None) -> int:
@@ -222,12 +212,16 @@ def resolve_generation_concurrency_limit(*, cpu_cores: int | None = None) -> int
     return max(1, min(generation_limit, hard_cap))
 
 
+AUTO_DATABASE_POOL_SIZE_CAP = 80
+AUTO_DATABASE_MAX_OVERFLOW_CAP = 40
+
+
 def _auto_database_pool_size(generation_limit: int) -> int:
-    return max(20, min(80, max(1, int(generation_limit)) // 8))
+    return max(20, min(AUTO_DATABASE_POOL_SIZE_CAP, max(1, int(generation_limit)) // 8))
 
 
 def _auto_database_max_overflow(generation_limit: int) -> int:
-    return max(10, min(40, max(1, int(generation_limit)) // 16))
+    return max(10, min(AUTO_DATABASE_MAX_OVERFLOW_CAP, max(1, int(generation_limit)) // 16))
 
 
 def _adaptive_absolute_guard_default(
@@ -238,7 +232,7 @@ def _adaptive_absolute_guard_default(
     cpu_cores = max(1, int(cpu_cores or _detected_cpu_cores()))
     floor_threads = _estimated_worker_floor_threads(cpu_cores)
     generation_threads = max(8, int(generation_concurrency or 1))
-    door_tokens = generation_threads * 2
+    door_tokens = generation_threads
     process_reserve = max(64, cpu_cores * 8)
     return max(
         8,
@@ -323,7 +317,7 @@ class ImageQueueSettings:
             occupancy_resume = max(1.0, occupancy_pause - 10.0)
         occupancy_hold = max(0.1, float(self.occupancy_hold_seconds or 2.5))
 
-        pool_size = _coerce_int(self.database_pool_size, 0, 0, 200)
+        pool_size = _coerce_int(self.database_pool_size, 0, 0, 400)
         if pool_size <= 0:
             pool_size = _auto_database_pool_size(generation_limit)
         overflow = int(self.database_max_overflow)
@@ -460,7 +454,7 @@ class ImageQueueSettings:
             ),
             prompt_suffix_enabled=_env_bool("IMAGE_PROMPT_SUFFIX_ENABLED", True),
             prompt_suffix=str(_first_env_value("IMAGE_PROMPT_SUFFIX", DEFAULT_PROMPT_SUFFIX)).strip(),
-            database_pool_size=_env_int("IMAGE_QUEUE_DB_POOL_SIZE", 0, 0, 200),
+            database_pool_size=_env_int("IMAGE_QUEUE_DB_POOL_SIZE", 0, 0, 400),
             database_max_overflow=_env_int("IMAGE_QUEUE_DB_MAX_OVERFLOW", -1, -1, 200),
             artifact_root=root,
             legacy_task_path=legacy_task_path,

@@ -183,9 +183,9 @@ curl http://localhost:2080/v1/images/generations \
 | `GPTIMAGE2API_AUTH_KEY`          | 必填         | 管理员和默认 API Key，环境变量优先于 `config.json`                                       |
 | `DATABASE_URL`                   | PostgreSQL   | Application Database 连接；本地默认使用 `data/gptimage2api.db`                          |
 | `GPTIMAGE2API_BASE_URL`          | 当前服务地址 | 生成对外可访问的图片和文件 URL                                                           |
-| `GPTIMAGE2API_THREAD_TOKENS`     | `0`          | 门口同步线程容量；`0` 表示自动（生图上限 × 2），手填正整数覆盖自动；账号、代理和上游仍有各自并发限制 |
+| `GPTIMAGE2API_THREAD_TOKENS`     | `0`          | 门口同步线程容量；`0` 表示自动（与生图上限相同），手填正整数覆盖自动；账号、代理和上游仍有各自并发限制 |
 | `GPTIMAGE2API_IMAGE_QUEUE_DATABASE_URL` | 必填      | 独立 Image Queue Store PostgreSQL 连接                                                   |
-| `GPTIMAGE2API_IMAGE_QUEUE_GENERATION_CONCURRENCY` | `0` | 本机生图并发上限；`0` 表示自动（`min(2000, max(300, 核数×300))`），手填正整数覆盖自动 |
+| `GPTIMAGE2API_IMAGE_QUEUE_GENERATION_CONCURRENCY` | `0` | 本机生图并发上限；`0` 表示自动（`max(300, 核数×300)`），手填正整数覆盖自动 |
 | `GPTIMAGE2API_IMAGE_QUEUE_OCCUPANCY_PAUSE_PERCENT` | `90` | CPU/内存/Swap 占用达到该百分比并持续约 2.5 秒后停止新入队、新生图和新注册 |
 | `GPTIMAGE2API_IMAGE_QUEUE_OCCUPANCY_RESUME_PERCENT` | `80` | 三项都低于该百分比并持续约 2.5 秒后恢复接新任务 |
 | `GPTIMAGE2API_IMAGE_QUEUE_OCCUPANCY_HOLD_SECONDS` | `2.5` | 占用门开关前的持续采样时间 |
@@ -197,7 +197,7 @@ curl http://localhost:2080/v1/images/generations \
 | `image_poll_timeout_secs`        | `60`         | 图片结果解析与轮询最长等待时间                                                           |
 | `log_retention_hours`            | `24`         | 调用日志自动保留小时数                                                                   |
 
-其余设置通过控制台维护。配置项的权威默认值与约束以当前接口投影为准。
+其余设置通过控制台维护。配置项的权威默认值与约束以当前接口投影为准。自动队列连接池每副本最多 80+40，两副本加应用池仍低于捆绑 PostgreSQL `max_connections=500`。本机生图名额按领取时阶段计算，下载过程仍占着生图槽。HTTP 入队不再跟 85% 连接池硬墙；备份恢复只有成功才会把图片队列、注册、GenBox 和备份调度拉起来，失败保持停机，队列未启动时拒绝入队。含队列的备份先恢复队列 dump；应用库 `pg_restore` 前关掉账号连接池，恢复期间健康检查不查库。恢复后会收掉快照里未过期的在画租约。监控占用门会推进 2.5 秒计时，积压满或积压查询失败时关门。
 
 ## 效果展示
 

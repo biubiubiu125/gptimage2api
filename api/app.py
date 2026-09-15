@@ -8,7 +8,7 @@ from anyio.to_thread import current_default_thread_limiter
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from api import accounts, ai, image_tasks, prompts, register, system
 from api.errors import install_exception_handlers
@@ -34,6 +34,14 @@ RETENTION_SHUTDOWN_TIMEOUT_SECS = 1.0
 BACKUP_RESTORE_THREAD_JOIN_TIMEOUT_SECS = 30.0
 
 
+def backup_restore_blocks_http(path: str) -> bool:
+    normalized = "/" + str(path or "").lstrip("/")
+    stripped = normalized.rstrip("/") or "/"
+    if stripped in {"/health", "/ready"} or stripped.startswith("/health"):
+        return False
+    return True
+
+
 class _BackupRestoreMaintenance:
     """Own the process-wide quiesce boundary used by backup restoration."""
 
@@ -41,7 +49,8 @@ class _BackupRestoreMaintenance:
         self._lock = RLock()
         self._stop_event: Event | None = None
         self._threads: tuple[Thread, ...] = ()
-        self._service_stops: tuple[tuple[str, Callable[[], object]], ...] = ()
+        self._thread_starts: tuple[Callable[[], Thread | None], ...] = ()
+        self._service_stops: tuple[tuple, ...] = ()
         self._stopped = False
         self._stop_error = ""
 
@@ -50,11 +59,13 @@ class _BackupRestoreMaintenance:
         *,
         stop_event: Event,
         threads: Sequence[Thread | None],
-        service_stops: Sequence[tuple[str, Callable[[], object]]],
+        service_stops: Sequence[tuple],
+        thread_starts: Sequence[Callable[[], Thread | None]] | None = None,
     ) -> None:
         with self._lock:
             self._stop_event = stop_event
             self._threads = tuple(thread for thread in threads if thread is not None)
+            self._thread_starts = tuple(thread_starts or ())
             self._service_stops = tuple(service_stops)
             self._stopped = False
             self._stop_error = ""
@@ -63,9 +74,30 @@ class _BackupRestoreMaintenance:
         with self._lock:
             self._stop_event = None
             self._threads = ()
+            self._thread_starts = ()
             self._service_stops = ()
             self._stopped = False
             self._stop_error = ""
+
+    def resume_background_threads(self) -> None:
+        with self._lock:
+            stop_event = self._stop_event
+            starts = self._thread_starts
+            current = self._threads
+        if stop_event is not None:
+            stop_event.clear()
+        live = tuple(thread for thread in current if thread is not None and thread.is_alive())
+        if live:
+            with self._lock:
+                self._threads = live
+            return
+        spawned: list[Thread] = []
+        for start in starts:
+            thread = start()
+            if thread is not None:
+                spawned.append(thread)
+        with self._lock:
+            self._threads = tuple(spawned)
 
     def stop(self) -> None:
         with self._lock:
@@ -78,29 +110,46 @@ class _BackupRestoreMaintenance:
             threads = self._threads
             service_stops = self._service_stops
 
-        if stop_event is not None:
-            stop_event.set()
-
         failures: list[str] = []
-        for name, stop in service_stops:
+        restart: list[tuple[str, Callable[[], object]]] = []
+        for item in service_stops:
+            name = item[0]
+            stop = item[1]
+            start = item[2] if len(item) >= 3 else None
             try:
-                stop()
+                result = stop()
             except Exception as exc:
                 failures.append(f"{name} 停止失败：{exc}")
+                break
+            if result is False:
+                failures.append(f"{name} 仍有未完成领取")
+                break
+            if callable(start):
+                restart.append((name, start))
 
-        for thread in threads:
-            try:
-                thread.join(BACKUP_RESTORE_THREAD_JOIN_TIMEOUT_SECS)
-                if thread.is_alive():
-                    failures.append(f"{thread.name or 'unknown'} 线程未停止")
-            except Exception as exc:
-                failures.append(f"{thread.name or 'unknown'} 线程停止失败：{exc}")
+        if not failures:
+            if stop_event is not None:
+                stop_event.set()
+            for thread in threads:
+                try:
+                    thread.join(BACKUP_RESTORE_THREAD_JOIN_TIMEOUT_SECS)
+                    if thread.is_alive():
+                        failures.append(f"{thread.name or 'unknown'} 线程未停止")
+                except Exception as exc:
+                    failures.append(f"{thread.name or 'unknown'} 线程停止失败：{exc}")
 
         if failures:
-            message = "；".join(failures)
+            if stop_event is not None:
+                stop_event.clear()
+            for name, start in reversed(restart):
+                try:
+                    start()
+                except Exception as exc:
+                    failures.append(f"{name} 恢复运行失败：{exc}")
             with self._lock:
-                self._stop_error = message
-            raise RuntimeError(message)
+                self._stopped = False
+                self._stop_error = ""
+            raise RuntimeError("；".join(failures))
 
 
 _backup_restore_maintenance = _BackupRestoreMaintenance()
@@ -116,9 +165,50 @@ def _prepare_backup_restore_maintenance() -> None:
 
 
 def _finish_backup_restore_maintenance() -> None:
-    # Restored in-memory repositories and workers must not continue using
-    # pre-restore state.  The restore response explicitly requires a process
-    # restart instead of silently trying to rebuild live services.
+    try:
+        start = image_task_service.start
+        try:
+            start(reclaim_restored_leases=True)
+        except TypeError:
+            start()
+    except Exception as exc:
+        logger.error({
+            "event": "backup_restore_queue_restart_failed",
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+        })
+    try:
+        register_service.start()
+    except Exception as exc:
+        logger.error({
+            "event": "backup_restore_register_restart_failed",
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+        })
+    try:
+        start_genbox_push_service()
+    except Exception as exc:
+        logger.error({
+            "event": "backup_restore_genbox_restart_failed",
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+        })
+    try:
+        backup_service.start()
+    except Exception as exc:
+        logger.error({
+            "event": "backup_restore_scheduler_restart_failed",
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+        })
+    try:
+        _backup_restore_maintenance.resume_background_threads()
+    except Exception as exc:
+        logger.error({
+            "event": "backup_restore_thread_restart_failed",
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+        })
     logger.warning({
         "event": "backup_restore_maintenance_finished",
         "requires_restart": True,
@@ -219,11 +309,28 @@ def create_app() -> FastAPI:
                     dashboard_metrics_thread,
                     register_scheduler_thread,
                 ),
+                thread_starts=(
+                    lambda: start_account_lifecycle_watcher(stop_event),
+                    lambda: start_retention_cleanup_scheduler(stop_event),
+                    lambda: dashboard_metrics_service.start_refresh_scheduler(
+                        log_service,
+                        stop_event,
+                    ),
+                    lambda: register_service.start_auto_scheduler(stop_event),
+                ),
                 service_stops=(
-                    ("register", lambda: register_service.shutdown(30)),
-                    ("image_queue", lambda: image_task_service.stop(30)),
+                    (
+                        "image_queue",
+                        lambda: image_task_service.stop(30, resume_if_undrained=True),
+                        image_task_service.start,
+                    ),
+                    (
+                        "register",
+                        lambda: register_service.shutdown(30),
+                        register_service.start,
+                    ),
                     ("genbox", shutdown_genbox_push_service),
-                    ("backup", backup_service.stop),
+                    ("backup", backup_service.stop, backup_service.start),
                 ),
             )
             yield
@@ -281,6 +388,23 @@ def create_app() -> FastAPI:
                     })
             _backup_restore_maintenance.deactivate()
     app = FastAPI(title="gptimage2api", version=app_version, lifespan=lifespan)
+
+    @app.middleware("http")
+    async def reject_requests_during_backup_restore(request, call_next):
+        if backup_restore_blocks_http(request.url.path):
+            is_active = getattr(backup_service, "is_restore_active", None)
+            if callable(is_active) and is_active():
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": {
+                            "message": "Service is restoring a backup. Please retry after the process restarts.",
+                            "type": "server_error",
+                            "code": "backup_restore_in_progress",
+                        }
+                    },
+                )
+        return await call_next(request)
 
     @app.middleware("http")
     async def add_generated_request_identity_header(request, call_next):

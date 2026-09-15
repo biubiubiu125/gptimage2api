@@ -6,10 +6,12 @@ services:
       dockerfile: Dockerfile
     container_name: gptimage2api
     restart: unless-stopped
+    stop_grace_period: 300s
+    # 同宿主机多副本不要无 CPU 限额叠加；每份都会按整机核数计算自动生图上限。不要在 Compose 里写死 CPU 限额。
     ulimits:
       nofile:
-        soft: 65535
-        hard: 65535
+        soft: 262144
+        hard: 262144
       nproc:
         soft: 65535
         hard: 65535
@@ -62,7 +64,7 @@ services:
 
   postgres:
     image: postgres:18-alpine
-    command: ["postgres", "-c", "max_connections=300"]
+    command: ["postgres", "-c", "max_connections=500"]
     container_name: gptimage2api-postgres
     restart: unless-stopped
     networks:

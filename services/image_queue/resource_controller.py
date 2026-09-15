@@ -42,6 +42,7 @@ class ImageQueueResourcePressureError(RuntimeError):
 
 class ResourceController:
     FILE_HANDLE_GUARD = 8192
+    FILE_HANDLE_NOFILE_RESERVE = 1024
     UPSTREAM_ERROR_WINDOW = 40
     UPSTREAM_ERROR_RATE_THRESHOLD = 0.45
     UPSTREAM_ERROR_MIN_SAMPLES = 8
@@ -56,6 +57,7 @@ class ResourceController:
         "resource_threads",
         "resource_file_handles",
         "resource_database_pool",
+        "resource_backlog",
         "resource_upstream_errors",
         "resource_pressure",
         "resource_paused",
@@ -77,6 +79,7 @@ class ResourceController:
         self._last_cpu_sample: tuple[int, float] | None = None
         self._occupancy_paused = False
         self._occupancy_pause_reason = ""
+        self._occupancy_latch_source = ""
         self._occupancy_high_since: float | None = None
         self._occupancy_low_since: float | None = None
         self._occupancy_cpu_sample: tuple[float, float] | None = None
@@ -111,9 +114,37 @@ class ResourceController:
             return cls(settings, database=database)
         return cls(settings, database=database, monotonic=monotonic)
 
+    def _process_nofile_limit(self) -> int | None:
+        limit: int | None = None
+        try:
+            import resource as unix_resource
+
+            soft, _hard = unix_resource.getrlimit(unix_resource.RLIMIT_NOFILE)
+            limit = int(soft)
+        except (AttributeError, ImportError, OSError, OverflowError, ValueError):
+            limit = None
+        if limit is None:
+            try:
+                process = psutil.Process()
+                getter = getattr(process, "rlimit", None)
+                flag = getattr(psutil, "RLIMIT_NOFILE", None)
+                if callable(getter) and flag is not None:
+                    soft, _hard = getter(flag)
+                    limit = int(soft)
+            except (AttributeError, OSError, OverflowError, TypeError, ValueError, psutil.Error):
+                return None
+        if limit is None or limit <= 0 or limit >= 2**30:
+            return None
+        return limit
+
     def _file_handle_guard(self) -> int:
         generation = max(1, int(getattr(self.settings, "generation_concurrency_limit", 1) or 1))
-        return max(int(self.FILE_HANDLE_GUARD), generation * 8 + 1024)
+        computed = max(int(self.FILE_HANDLE_GUARD), generation * 8 + 1024)
+        nofile = self._process_nofile_limit()
+        if nofile is None:
+            return computed
+        ceiling = max(1, int(nofile) - int(self.FILE_HANDLE_NOFILE_RESERVE))
+        return min(computed, ceiling)
 
     def _prime_cpu_probe(self) -> None:
         try:
@@ -143,10 +174,16 @@ class ResourceController:
         with self._lock:
             return self._occupancy_pause_reason
 
+    @property
+    def occupancy_latch_source(self) -> str:
+        with self._lock:
+            return self._occupancy_latch_source
+
     def fail_closed(self, reason: str = "resource_pressure") -> "ResourceController":
         with self._lock:
             self._occupancy_paused = True
             self._occupancy_pause_reason = str(reason or "resource_pressure")
+            self._occupancy_latch_source = "fail_closed"
             self._occupancy_high_since = float(self._monotonic())
             self._occupancy_low_since = None
         return self
@@ -285,17 +322,29 @@ class ResourceController:
             return float(fallback)
         now = self._monotonic()
         previous = self._last_cpu_sample
-        if previous is None or now <= previous[1] or usage_usec < previous[0]:
+        pause = float(self.settings.occupancy_pause_percent)
+        last_percent = None if self._last_cpu_percent is None else float(self._last_cpu_percent)
+        fallback_value = float(fallback)
+        if previous is None or usage_usec < previous[0]:
             self._last_cpu_sample = (usage_usec, now)
-            return float(fallback)
+            if last_percent is not None and (last_percent >= pause or last_percent >= fallback_value):
+                return last_percent
+            return fallback_value
         elapsed = now - previous[1]
         if elapsed <= 0:
-            if self._last_cpu_percent is not None:
-                return float(self._last_cpu_percent)
-            return float(fallback)
-        self._last_cpu_sample = (usage_usec, now)
+            if last_percent is not None:
+                return last_percent
+            return fallback_value
         used_seconds = float(usage_usec - previous[0]) / 1_000_000.0
         percent = max(0.0, min(100.0, used_seconds / elapsed / limit_cores * 100.0))
+        if (
+            elapsed < self.CPU_OCCUPANCY_MIN_INTERVAL
+            and percent < pause
+            and last_percent is not None
+            and percent < last_percent
+        ):
+            return last_percent
+        self._last_cpu_sample = (usage_usec, now)
         self._last_cpu_percent = percent
         return percent
 
@@ -354,29 +403,41 @@ class ResourceController:
                 self._upstream_outcomes.append((now, True))
                 return
             code = str(error_code or "").strip().lower()
-            try:
-                numeric_status = int(status_code) if status_code is not None else None
-            except (TypeError, ValueError):
-                numeric_status = None
-            transient = (
-                numeric_status in {408, 429, 500, 502, 503, 504}
-                or code in {
-                    "upstream_timeout",
-                    "upstream_5xx",
-                    "upstream_rate_limited",
-                    "rate_limited",
-                    "image_stream_interrupted",
-                    "image_poll_timeout",
-                    "image_stream_timeout",
-                    "network_error",
-                    "upstream_connection_failed",
-                    "upstream_connection_timeout",
-                    "upstream_unavailable",
-                }
-                or (numeric_status is not None and numeric_status >= 500)
-            )
-            # Only count transient upstream pressure; permanent input/policy errors
-            # should not freeze the whole generation pipeline.
+            if not code or code in {
+                "no_available_account",
+                "internal_error",
+                "image_claim_timeout",
+                "insufficient_quota",
+                "image_queue_resource_pressure",
+                "image_queue_unavailable",
+                "image_queue_storage_full",
+                "queue_timeout",
+                "local_artifact_unavailable",
+                "worker_local_recovery_unavailable",
+                "recovery_account_unavailable",
+                "task_interrupted",
+                "image_task_pending",
+                "content_policy_violation",
+                "invalid_image_input",
+                "auth_invalid",
+                "account_disabled",
+            }:
+                return
+            transient = code.startswith("upstream_") or code in {
+                "upstream_timeout",
+                "upstream_5xx",
+                "upstream_rate_limited",
+                "rate_limited",
+                "image_stream_interrupted",
+                "image_poll_timeout",
+                "image_stream_timeout",
+                "network_error",
+                "upstream_connection_failed",
+                "upstream_connection_timeout",
+                "upstream_unavailable",
+                "upstream_error",
+            }
+            # Local 5xx / empty-pool 503 must not freeze the whole generation pipeline.
             if transient:
                 self._upstream_outcomes.append((now, False))
 
@@ -644,10 +705,10 @@ class ResourceController:
         )
 
     def _memory_pressure(self, snapshot: ResourceSnapshot) -> bool:
-        return snapshot.memory_limit_bytes > 0 and snapshot.available_memory_bytes < max(
-            512 * 1024**2,
-            int(snapshot.memory_limit_bytes * 0.05),
-        )
+        limit = int(snapshot.memory_limit_bytes or 0)
+        if limit <= 0:
+            return False
+        return snapshot.available_memory_bytes < int(limit * 0.05)
 
     def _occupancy_percentages(self, snapshot: ResourceSnapshot) -> tuple[float, float, float]:
         cpu = max(0.0, min(100.0, float(snapshot.cpu_percent or 0.0)))
@@ -689,7 +750,7 @@ class ResourceController:
         self._occupancy_cpu_sample = (clamped, now)
         return clamped
 
-    def _update_occupancy_gate(self, snapshot: ResourceSnapshot) -> str:
+    def _update_occupancy_gate(self, snapshot: ResourceSnapshot, *, source: str = "") -> str:
         now = float(self._monotonic())
         hold = max(0.1, float(self.settings.occupancy_hold_seconds))
         pause = float(self.settings.occupancy_pause_percent)
@@ -705,6 +766,8 @@ class ResourceController:
             if not self._occupancy_paused and (now - self._occupancy_high_since) >= hold:
                 self._occupancy_paused = True
                 self._occupancy_pause_reason = self._occupancy_reason_from_values(cpu, memory, swap)
+                if source:
+                    self._occupancy_latch_source = source
         elif self._occupancy_paused:
             self._occupancy_high_since = None
             if low:
@@ -713,12 +776,16 @@ class ResourceController:
                 if (now - self._occupancy_low_since) >= hold:
                     self._occupancy_paused = False
                     self._occupancy_pause_reason = ""
+                    self._occupancy_latch_source = ""
                     self._occupancy_low_since = None
             else:
                 self._occupancy_low_since = None
         elif low:
-            self._occupancy_high_since = None
-            self._occupancy_low_since = None
+            if self._occupancy_low_since is None:
+                self._occupancy_low_since = now
+            if (now - self._occupancy_low_since) >= hold:
+                self._occupancy_high_since = None
+                self._occupancy_low_since = None
         else:
             # 80–90% band: keep the high timer so a brief dip does not cancel the latch.
             self._occupancy_low_since = None
@@ -731,10 +798,11 @@ class ResourceController:
         snapshot: ResourceSnapshot,
         *,
         include_upstream: bool = True,
+        include_database_pool: bool = True,
     ) -> str:
         if self._disk_pressure(snapshot):
             return "resource_disk"
-        if snapshot.database_pool_percent >= 85.0:
+        if include_database_pool and snapshot.database_pool_percent >= 85.0:
             return "resource_database_pool"
         if self._memory_pressure(snapshot):
             return "resource_memory"
@@ -749,8 +817,6 @@ class ResourceController:
     def _allow_recovery_unlocked(self, snapshot: ResourceSnapshot) -> ResourceDecision:
         if self._disk_pressure(snapshot):
             return ResourceDecision(False, "resource_disk", 0)
-        if self._memory_pressure(snapshot):
-            return ResourceDecision(False, "resource_memory", 0)
         if snapshot.database_pool_percent >= 95.0:
             return ResourceDecision(False, "resource_database_pool", 0)
         if snapshot.file_handle_count >= self._file_handle_guard():
@@ -760,7 +826,7 @@ class ResourceController:
         return ResourceDecision(True, "", max(1, self.settings.absolute_guard))
 
     def _allow_new_generation_unlocked(self, snapshot: ResourceSnapshot) -> ResourceDecision:
-        occupancy_reason = self._update_occupancy_gate(snapshot)
+        occupancy_reason = self._update_occupancy_gate(snapshot, source="generation")
         if occupancy_reason:
             return ResourceDecision(False, occupancy_reason, 0)
         hard_reason = self._hard_resource_wall(snapshot)
@@ -769,7 +835,7 @@ class ResourceController:
         return ResourceDecision(True, "", max(1, int(self.settings.generation_concurrency_limit)))
 
     def _allow_new_registration_unlocked(self, snapshot: ResourceSnapshot) -> ResourceDecision:
-        occupancy_reason = self._update_occupancy_gate(snapshot)
+        occupancy_reason = self._update_occupancy_gate(snapshot, source="registration")
         if occupancy_reason:
             return ResourceDecision(False, occupancy_reason, 0)
         return ResourceDecision(True, "", 1)
@@ -777,13 +843,34 @@ class ResourceController:
     def _allow_new_submission_unlocked(self, snapshot: ResourceSnapshot) -> ResourceDecision:
         if self._disk_pressure(snapshot):
             return ResourceDecision(False, "resource_disk", 0)
-        occupancy_reason = self._update_occupancy_gate(snapshot)
+        occupancy_reason = self._update_occupancy_gate(snapshot, source="submission")
         if occupancy_reason:
             return ResourceDecision(False, occupancy_reason, 0)
-        hard_reason = self._hard_resource_wall(snapshot, include_upstream=False)
+        hard_reason = self._hard_resource_wall(
+            snapshot,
+            include_upstream=False,
+            include_database_pool=False,
+        )
         if hard_reason:
             return ResourceDecision(False, hard_reason, 0)
         return ResourceDecision(True, "", 1)
+
+    def inspect_generation_gate(
+        self,
+        snapshot: ResourceSnapshot | None = None,
+    ) -> tuple[bool, str, ResourceDecision]:
+        """Sample occupancy latch and hard walls, advancing the 2.5s timers."""
+        resolved = self._resolve_snapshot(snapshot)
+        with self._lock:
+            generation = self._allow_new_generation_unlocked(resolved)
+            occupancy_paused = bool(self._occupancy_paused)
+            if occupancy_paused:
+                reason = str(self._occupancy_pause_reason or generation.reason or "resource_occupancy")
+                return True, reason, generation
+            if not generation.allowed:
+                reason = str(generation.reason or "resource_pressure")
+                return False, reason, generation
+            return False, "", generation
 
     def evaluate(
         self,
@@ -796,7 +883,7 @@ class ResourceController:
             return resolved, generation, recovery
 
     def allow_recovery(self, snapshot: ResourceSnapshot | None = None) -> ResourceDecision:
-        """Recovery/saving may continue under CPU pressure; only hard resource walls block it."""
+        """Recovery/saving continues under occupancy and memory pressure; disk/handles/threads/pool still block it."""
         resolved = self._resolve_snapshot(snapshot)
         with self._lock:
             return self._allow_recovery_unlocked(resolved)

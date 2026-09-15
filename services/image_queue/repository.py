@@ -1494,14 +1494,16 @@ class ImageQueueRepository:
         *,
         now: datetime,
     ) -> None:
-        """Drop only expired account leases for a claimable job.
+        """Drop leftover account leases for a claimable job.
 
-        Must not delete an in-flight winner's lease while a concurrent claimer
-        still holds a stale SELECT of the same queued job.
+        The caller already holds FOR UPDATE SKIP LOCKED on a queued job, so any
+        remaining lease for this job_id is a ghost that would collide on
+        uq_image_account_leases_job. Expired idle leases of other jobs are
+        handled by _clear_expired_inactive_account_leases.
         """
+        del now
         session.execute(delete(ImageAccountLease).where(
             ImageAccountLease.job_id == job_id,
-            ImageAccountLease.expires_at <= now,
         ))
 
     @staticmethod
@@ -1686,12 +1688,14 @@ class ImageQueueRepository:
         allow_unowned_local_artifacts: bool = False,
         expected_process_instance_id: str = "",
     ) -> ClaimedJob | None:
+        if expected_process_instance_id:
+            with self.database.session() as session:
+                self._ensure_worker_process_current(
+                    session,
+                    worker_id,
+                    expected_process_instance_id=expected_process_instance_id,
+                )
         with self.database.session() as session:
-            self._ensure_worker_process_current(
-                session,
-                worker_id,
-                expected_process_instance_id=expected_process_instance_id,
-            )
             self._clear_expired_inactive_account_leases(session, now=claim_time)
             after_sort_key: tuple[datetime, datetime, int, UUID] | None = None
             # When the recovery pool is saturated, skip the recovery pass so we
@@ -1819,6 +1823,7 @@ class ImageQueueRepository:
                     elif task is not None:
                         task.wait_reason = "worker_local_recovery"
                         task.updated_at = claim_time
+                    session.commit()
                     continue
                 if local_recovery:
                     chosen = ImageAccountCandidate(
@@ -1876,10 +1881,12 @@ class ImageQueueRepository:
                             )
                             if task is not None:
                                 self._aggregate_task(session, task)
+                            session.commit()
                             continue
                         if task is not None:
                             task.wait_reason = "recovery_account"
                             task.updated_at = claim_time
+                        session.commit()
                         continue
                 elif (
                     should_switch_image_account(job.error_code)
@@ -1918,6 +1925,7 @@ class ImageQueueRepository:
                         task.updated_at = claim_time
                     if not recovery_pass and not restricted_candidates:
                         return None
+                    session.commit()
                     continue
 
                 previous_status = job.status
@@ -1942,6 +1950,13 @@ class ImageQueueRepository:
                     next_stage=next_stage,
                     stamp=claim_time,
                 )
+
+                if expected_process_instance_id:
+                    self._ensure_worker_process_current(
+                        session,
+                        worker_id,
+                        expected_process_instance_id=expected_process_instance_id,
+                    )
 
                 # Atomic ownership transfer: works on PostgreSQL SKIP LOCKED and
                 # also prevents SQLite double-claim because only one UPDATE wins.
@@ -1980,6 +1995,7 @@ class ImageQueueRepository:
                             ImageAccountLease.lease_token == lease_token,
                             ImageAccountLease.lease_version == lease_version,
                         ))
+                    session.commit()
                     continue
 
                 if task is not None:
@@ -3049,11 +3065,21 @@ class ImageQueueRepository:
                 self._aggregate_task(session, task)
             return True
 
+    def reclaim_restored_leases(self, now: datetime | None = None) -> int:
+        self.stale_all_worker_states()
+        return self.reclaim_expired_leases(
+            now,
+            include_unexpired=True,
+            ignore_live_owners=True,
+        )
+
     def reclaim_expired_leases(
         self,
         now: datetime | None = None,
         *,
         protected_claims: Iterable[ClaimedJob] = (),
+        include_unexpired: bool = False,
+        ignore_live_owners: bool = False,
     ) -> int:
         reclaim_time = _now(now)
         reclaim_time = _as_utc(reclaim_time) or datetime.now(timezone.utc)
@@ -3062,13 +3088,16 @@ class ImageQueueRepository:
             for claim in protected_claims
         }
         with self.database.session() as session:
-            jobs = session.execute(
+            statement = (
                 select(ImageJob)
                 .where(ImageJob.status.in_([JobStatus.LEASED.value, JobStatus.RUNNING.value]))
-                .where(ImageJob.lease_expires_at.is_not(None))
-                .where(ImageJob.lease_expires_at <= reclaim_time)
                 .with_for_update(skip_locked=True)
-            ).scalars().all()
+            )
+            if not include_unexpired:
+                statement = statement.where(ImageJob.lease_expires_at.is_not(None)).where(
+                    ImageJob.lease_expires_at <= reclaim_time
+                )
+            jobs = session.execute(statement).scalars().all()
             jobs = [
                 job
                 for job in jobs
@@ -3081,7 +3110,7 @@ class ImageQueueRepository:
                 if str(job.lease_owner or "").strip()
             }
             active_owner_ids: set[str] = set()
-            if owner_ids:
+            if owner_ids and not ignore_live_owners:
                 worker_fresh_cutoff = reclaim_time - timedelta(
                     seconds=max(30.0, float(self.lease_seconds))
                 )
@@ -3117,7 +3146,8 @@ class ImageQueueRepository:
                 job
                 for job in jobs
                 if (
-                    str(job.lease_owner or "").strip() not in active_owner_ids
+                    ignore_live_owners
+                    or str(job.lease_owner or "").strip() not in active_owner_ids
                     or claim_runtime_expired(job)
                 )
             ]
@@ -3623,6 +3653,20 @@ class ImageQueueRepository:
                 ),
                 "",
             )
+
+    def has_live_worker_states(self, now: datetime | None = None) -> bool:
+        current = now if now is not None else utc_now()
+        cutoff = current - timedelta(seconds=max(60.0, float(self.lease_seconds) * 2.0))
+        try:
+            with self.database.session() as session:
+                rows = session.execute(
+                    select(ImageWorkerState.heartbeat_at).where(
+                        ImageWorkerState.heartbeat_at >= cutoff
+                    )
+                ).all()
+        except Exception:
+            return True
+        return bool(rows)
 
     def purge_terminal_tasks(
         self,
@@ -4702,6 +4746,29 @@ class ImageQueueRepository:
             )
             return bool(result.rowcount or 0)
 
+    def stale_all_worker_states(self) -> int:
+        stale_after = max(60.0, float(self.lease_seconds) * 2.0) + 1.0
+        cutoff = utc_now() - timedelta(seconds=stale_after)
+        with self.database.session() as session:
+            rows = session.execute(
+                select(ImageWorkerState).with_for_update()
+            ).scalars().all()
+            for state in rows:
+                snapshot = dict(state.resource_snapshot or {})
+                snapshot.update({
+                    "worker_active": False,
+                    "run_worker": False,
+                    "current_concurrency": 0,
+                    "current_generation_concurrency": 0,
+                    "effective_concurrency": 0,
+                    "remaining_capacity": 0,
+                })
+                state.resource_snapshot = snapshot
+                state.heartbeat_at = cutoff
+                state.effective_concurrency = 0
+                state.pause_reason = "restored"
+            return len(rows)
+
     def mark_worker_inactive(
         self,
         worker_id: str,
@@ -4732,7 +4799,8 @@ class ImageQueueRepository:
                 "effective_concurrency": 0,
                 "remaining_capacity": 0,
             })
-            state.heartbeat_at = utc_now()
+            stale_after = max(60.0, float(self.lease_seconds) * 2.0) + 1.0
+            state.heartbeat_at = utc_now() - timedelta(seconds=stale_after)
             state.resource_snapshot = snapshot
             state.effective_concurrency = 0
             state.pause_reason = "stopped"

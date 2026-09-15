@@ -1,7 +1,8 @@
 services:
   postgres:
     image: postgres:18-alpine
-    command: ["postgres", "-c", "max_connections=300"]
+    # 自动队列连接池每副本最多 80+40，两副本加应用池仍低于该上限。
+    command: ["postgres", "-c", "max_connections=500"]
     container_name: gptimage2api-postgres
     restart: unless-stopped
     networks:

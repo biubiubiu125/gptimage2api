@@ -706,6 +706,11 @@ def _build_diagnostic_groups(
     occupancy_paused = bool(capacity.get("occupancy_paused"))
     pause_reason = str(capacity.get("pause_reason") or "")
     occupancy_meta = pause_reason or "CPU / 内存 / Swap 占用 90% 关门，低于 80% 开门"
+    occupancy_source = str(capacity.get("occupancy_latch_source") or "")
+    if occupancy_source == "registration":
+        occupancy_meta = f"{occupancy_meta}（注册探测关门）"
+    elif occupancy_source == "submission":
+        occupancy_meta = f"{occupancy_meta}（入队探测关门）"
     gate_closed = ResourceController.generation_gate_closed(occupancy_paused, pause_reason)
     occupancy_value = "已关门" if gate_closed else ("开着" if capacity else "-")
     occupancy_tone = "danger" if gate_closed else ("success" if capacity else "muted")
@@ -757,7 +762,7 @@ def _build_diagnostic_groups(
                 _diagnostic_item("current_generation", "当前在画", _int(capacity.get("current_generation")), "正在生成的图片", "info"),
                 _diagnostic_item("remaining_account_slots", "账号空位", remaining_slots if capacity else "-", f"可用账号 {_int(capacity.get('available_accounts'))}", "info"),
                 _diagnostic_item("effective_generation", "有效并发", effective_generation if capacity else "-", "min(生图上限, 账号空位)", "info"),
-                _diagnostic_item("thread_capacity", "门口令牌", thread_tokens or "-", "启动时 = 生图上限 × 2，0 表示自动", "info"),
+                _diagnostic_item("thread_capacity", "门口令牌", thread_tokens or "-", "启动时与生图上限相同，0 表示自动", "info"),
                 _diagnostic_item("occupancy_gate", "资源门闩", occupancy_value, occupancy_meta, occupancy_tone),
             ],
         },

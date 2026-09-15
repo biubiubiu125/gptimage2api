@@ -187,9 +187,9 @@ Available models depend on the upstream accounts and the current `/v1/models` re
 | `GPTIMAGE2API_AUTH_KEY` | Required | Administrator and default API key; the environment variable takes precedence over `config.json` |
 | `DATABASE_URL` | PostgreSQL | Application Database connection; defaults to `data/gptimage2api.db` when unset |
 | `GPTIMAGE2API_BASE_URL` | Current service URL | Public base URL used for generated image and file links |
-| `GPTIMAGE2API_THREAD_TOKENS` | `0` | Door-thread capacity; `0` means auto (generation limit × 2). A positive integer overrides auto. Accounts, proxies, and upstream services keep their own limits |
+| `GPTIMAGE2API_THREAD_TOKENS` | `0` | Door-thread capacity; `0` means auto (same as generation limit). A positive integer overrides auto. Accounts, proxies, and upstream services keep their own limits |
 | `GPTIMAGE2API_IMAGE_QUEUE_DATABASE_URL` | Required | Separate PostgreSQL queue database for persistent image tasks |
-| `GPTIMAGE2API_IMAGE_QUEUE_GENERATION_CONCURRENCY` | `0` | Per-host generation concurrency; `0` means auto (`min(2000, max(300, cores×300))`) |
+| `GPTIMAGE2API_IMAGE_QUEUE_GENERATION_CONCURRENCY` | `0` | Per-host generation concurrency; `0` means auto (`max(300, cores×300)`) |
 | `GPTIMAGE2API_IMAGE_QUEUE_OCCUPANCY_PAUSE_PERCENT` | `90` | Pause new enqueue/generation/registration after CPU, memory, or swap stays at or above this percent for about 2.5 seconds |
 | `GPTIMAGE2API_IMAGE_QUEUE_OCCUPANCY_RESUME_PERCENT` | `80` | Resume after all three stay below this percent for about 2.5 seconds |
 | `GPTIMAGE2API_IMAGE_QUEUE_OCCUPANCY_HOLD_SECONDS` | `2.5` | How long occupancy must stay high or low before the gate flips |
@@ -201,7 +201,7 @@ Available models depend on the upstream accounts and the current `/v1/models` re
 | `image_poll_timeout_secs` | `60` | Maximum wait for image result polling and parsing |
 | `log_retention_hours` | `24` | Automatic call-record retention period in hours |
 
-Other settings are managed through the console. The current backend projection is authoritative for defaults and constraints.
+Other settings are managed through the console. The current backend projection is authoritative for defaults and constraints. Auto queue pools cap at 80+40 per replica so two replicas plus the application pool stay under bundled PostgreSQL `max_connections=500`. In-process generation slots follow the stage at claim time, so downloads keep occupying a generation slot. HTTP enqueue no longer follows the 85% queue-pool wall; generation still does. Backup restore restarts the image queue, register, GenBox, and backup scheduler only after a successful restore, refuses enqueue while the queue is stopped, disposes the application pool before `pg_restore --clean`, skips database health probes during restore, and reclaims unrestored in-flight leases after restart. The occupancy monitor advances the 2.5s timer and fail-closes on a full or unreadable backlog.
 
 ## Screenshots
 

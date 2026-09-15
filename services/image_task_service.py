@@ -479,7 +479,7 @@ class ImageTaskService:
             raise ImageQueueUnavailableError("image queue PostgreSQL is not started")
         return self.repository
 
-    def start(self) -> None:
+    def start(self, *, reclaim_restored_leases: bool = False) -> None:
         if self._started:
             return
         self._startup_error = None
@@ -521,7 +521,12 @@ class ImageTaskService:
             import_legacy_tasks = getattr(self.recovery, "import_legacy_tasks", None)
             if callable(import_legacy_tasks):
                 import_legacy_tasks(self.settings.legacy_task_path)
-            self.recovery.recover()
+            recover = getattr(self.recovery, "recover", None)
+            if callable(recover):
+                try:
+                    recover(reclaim_restored=bool(reclaim_restored_leases))
+                except TypeError:
+                    recover()
             self._run_worker_maintenance()
             pending_ttl_seconds = int(self.settings.pending_ttl_seconds)
             if pending_ttl_seconds > 0:
@@ -559,26 +564,60 @@ class ImageTaskService:
             self._startup_error = exc
             raise
 
-    def stop(self, timeout: float | None = None) -> None:
+    def stop(self, timeout: float | None = None, *, resume_if_undrained: bool = False) -> bool:
         drained = True
         if self.worker is not None:
-            drained = self.worker.stop(timeout) is not False
-        self._started = False
+            try:
+                drained = self.worker.stop(
+                    timeout,
+                    resume_if_undrained=resume_if_undrained,
+                ) is not False
+            except TypeError:
+                drained = self.worker.stop(timeout) is not False
         if not drained:
-            # A timed-out worker owns executor threads that cannot be reused
-            # safely for a later lifecycle.  Detach it so the next start builds
-            # a fresh manager; the old claims are fenced by their lease token.
             logger.warning({
-                "event": "image_queue_worker_detached_after_shutdown_timeout",
+                "event": "image_queue_shutdown_timeout_keeps_leases",
+                "resume_if_undrained": bool(resume_if_undrained),
             })
-            self.worker = None
-        if self._owns_database and self.database is not None and drained:
+            return False
+        self._started = False
+        self.worker = None
+        return True
+
+    def has_active_claims(self) -> bool:
+        worker = self.worker
+        if worker is None:
+            return False
+        lock = getattr(worker, "_lock", None)
+
+        def _live() -> bool:
+            if bool(getattr(worker, "_claim_in_flight", False)):
+                return True
+            dispatcher = getattr(worker, "_dispatcher", None)
+            is_alive = getattr(dispatcher, "is_alive", None)
+            if callable(is_alive) and is_alive():
+                return True
+            futures = getattr(worker, "_futures", None) or {}
+            return any(not future.done() for future in futures)
+
+        if lock is not None:
+            with lock:
+                return _live()
+        return _live()
+
+    def has_live_queue_workers(self) -> bool:
+        repository = getattr(self, "repository", None)
+        checker = getattr(repository, "has_live_worker_states", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker())
+        except Exception:
+            return True
+
+    def dispose_database(self) -> None:
+        if self.database is not None:
             self.database.dispose()
-        elif self._owns_database and self.database is not None:
-            logger.warning({
-                "event": "image_queue_shutdown_database_kept_alive",
-                "reason": "active image jobs did not reach a safe checkpoint before timeout",
-            })
 
     def health_summary(self) -> dict[str, object]:
         if self._startup_error is not None:
@@ -1484,19 +1523,16 @@ class ImageTaskService:
         if controller is None:
             return occupancy_paused, pause_reason, generation
         try:
-            evaluate = getattr(controller, "evaluate", None)
-            if callable(evaluate):
-                evaluated = evaluate()
-                if isinstance(evaluated, tuple) and len(evaluated) >= 2:
-                    generation = evaluated[1]
+            inspect_gate = getattr(controller, "inspect_generation_gate", None)
+            if callable(inspect_gate):
+                occupancy_paused, pause_reason, generation = inspect_gate()
             else:
-                allow = getattr(controller, "allow_new_generation", None)
-                if callable(allow):
-                    generation = allow()
+                occupancy_paused = bool(getattr(controller, "occupancy_paused", False))
+                pause_reason = str(getattr(controller, "occupancy_pause_reason", "") or "")
         except Exception:
             return True, "resource_pressure", None
-        occupancy_paused = bool(getattr(controller, "occupancy_paused", False))
-        pause_reason = str(getattr(controller, "occupancy_pause_reason", "") or "")
+        occupancy_paused = bool(occupancy_paused)
+        pause_reason = str(pause_reason or "")
         if occupancy_paused and not pause_reason:
             pause_reason = "resource_occupancy"
         if (
@@ -1508,9 +1544,12 @@ class ImageTaskService:
         return occupancy_paused, pause_reason, generation
 
     def _queue_capacity_view_without_worker(self) -> dict[str, object]:
-        occupancy_paused, pause_reason, _generation = self._live_generation_gate(
-            self._resource_controller()
-        )
+        controller = self._resource_controller()
+        occupancy_paused, pause_reason, _generation = self._live_generation_gate(controller)
+        occupancy_paused, pause_reason = self._overlay_backlog_gate(occupancy_paused, pause_reason)
+        occupancy_latch_source = ""
+        if controller is not None:
+            occupancy_latch_source = str(getattr(controller, "occupancy_latch_source", "") or "")
         settings = getattr(self, "_settings", None)
         if settings is None:
             settings = getattr(self, "settings", None)
@@ -1525,6 +1564,7 @@ class ImageTaskService:
             "available_accounts": 0,
             "occupancy_paused": occupancy_paused,
             "pause_reason": pause_reason,
+            "occupancy_latch_source": occupancy_latch_source,
             "effective_generation": 0,
         }
 
@@ -1549,19 +1589,31 @@ class ImageTaskService:
         remaining_slots = int(snap.get("remaining_account_slots") or 0)
         available_accounts = int(snap.get("available_account_count") or 0)
         occupancy_paused = bool(snap.get("occupancy_paused"))
+        occupancy_latch_source = str(snap.get("occupancy_latch_source") or "")
         pause_reason = pause_reason or str(snap.get("pause_reason") or "")
+        live_slots = getattr(worker, "live_account_slot_capacity", None)
+        if callable(live_slots):
+            try:
+                live_remaining, live_available = live_slots()
+                remaining_slots = int(live_remaining)
+                available_accounts = int(live_available)
+            except Exception:
+                remaining_slots = 0
+                available_accounts = 0
         controller = getattr(worker, "resource_controller", None)
         if controller is not None:
             live_paused, live_reason, _generation = self._live_generation_gate(controller)
             occupancy_paused = live_paused
+            occupancy_latch_source = str(
+                getattr(controller, "occupancy_latch_source", "") or occupancy_latch_source
+            )
             if live_reason:
                 pause_reason = live_reason
             elif live_paused:
                 pause_reason = pause_reason or "resource_occupancy"
+        occupancy_paused, pause_reason = self._overlay_backlog_gate(occupancy_paused, pause_reason)
         if occupancy_paused or ResourceController.generation_gate_closed(False, pause_reason):
             effective = 0
-        elif "effective_generation" in snap:
-            effective = int(snap.get("effective_generation") or 0)
         elif generation_limit:
             effective = min(generation_limit, remaining_slots)
         else:
@@ -1573,8 +1625,35 @@ class ImageTaskService:
             "available_accounts": available_accounts,
             "occupancy_paused": occupancy_paused,
             "pause_reason": pause_reason,
+            "occupancy_latch_source": occupancy_latch_source,
             "effective_generation": effective,
         }
+
+    def _backlog_gate_reason(self) -> str:
+        repository = getattr(self, "repository", None)
+        settings = getattr(self, "_settings", None) or getattr(self, "settings", None)
+        count_backlog = getattr(repository, "count_backlog_tasks", None)
+        if repository is None or not callable(count_backlog) or settings is None:
+            return ""
+        try:
+            max_backlog = max(1, int(getattr(settings, "max_backlog", 0) or 0))
+            if int(count_backlog() or 0) >= max_backlog:
+                return "resource_backlog"
+        except Exception:
+            return "resource_backlog"
+        return ""
+
+    def _overlay_backlog_gate(
+        self,
+        occupancy_paused: bool,
+        pause_reason: str,
+    ) -> tuple[bool, str]:
+        if occupancy_paused:
+            return occupancy_paused, pause_reason
+        backlog_reason = self._backlog_gate_reason()
+        if backlog_reason:
+            return True, backlog_reason
+        return occupancy_paused, pause_reason
 
     def _ensure_backlog_capacity(self, repository: ImageQueueRepository) -> None:
         max_backlog = max(1, int(getattr(self.settings, "max_backlog", 0) or 0))
@@ -2552,6 +2631,8 @@ class ImageTaskService:
         source_endpoint: str = "",
         request_started_at: float | None = None,
     ) -> dict[str, Any]:
+        if not bool(getattr(self, "_started", False)):
+            raise ImageQueueUnavailableError("image queue is not started")
         repository = self._require_repository()
         public_model = require_public_image_model(model)
         client_id = _clean_client_task_id(client_task_id)
@@ -2593,59 +2674,63 @@ class ImageTaskService:
         self._ensure_backlog_capacity(repository)
         self._ensure_submission_capacity()
         task_id = existing.id if existing is not None else uuid4()
-        image_paths, mask_paths, input_artifacts = self._persist_inputs(task_id, images, masks)
-        payload: dict[str, Any] = {
-            "prompt": effective_prompt,
-            "model": public_model,
-            "n": count,
-            "size": size,
-            "quality": _clean(quality, "auto"),
-            "response_format": response_format,
-            "base_url": _clean(base_url),
-            "trace_headers": sanitize_trace_headers(trace_headers or {}),
-        }
-        trace_payload = dict(payload["trace_headers"])
-        if trace_payload.get("call_id"):
-            payload["call_id"] = trace_payload["call_id"]
-        source_hash = _clean(source_request_hash)
-        if source_hash:
-            payload["source_request_hash"] = source_hash
-        endpoint = _clean(source_endpoint)
-        if endpoint:
-            payload["source_endpoint"] = endpoint[:255]
+        image_paths: list[str] = []
+        mask_paths: list[str] = []
+        input_artifacts: tuple[Any, ...] = ()
         try:
-            started_at = float(request_started_at or 0.0)
-        except (TypeError, ValueError):
-            started_at = 0.0
-        if started_at > 0:
-            payload["request_started_at"] = started_at
-        if image_paths:
-            payload["input_artifacts"] = image_paths
-        if mask_paths:
-            payload["mask_artifacts"] = mask_paths
-        request = EnqueueRequest(
-            owner_key=owner,
-            idempotency_key=selected_key,
-            request_hash=request_hash,
-            task_type="edit" if mode == "edit" else "generation",
-            original_prompt=original_prompt,
-            effective_prompt=effective_prompt,
-            request_payload=payload,
-            required_jobs=count,
-            client_task_id=client_id,
-            public_model=public_model,
-            prompt_suffix_version=suffix_version,
-            task_id=task_id,
-            input_artifacts=input_artifacts,
-        )
-        try:
+            image_paths, mask_paths, input_artifacts = self._persist_inputs(task_id, images, masks)
+            payload: dict[str, Any] = {
+                "prompt": effective_prompt,
+                "model": public_model,
+                "n": count,
+                "size": size,
+                "quality": _clean(quality, "auto"),
+                "response_format": response_format,
+                "base_url": _clean(base_url),
+                "trace_headers": sanitize_trace_headers(trace_headers or {}),
+            }
+            trace_payload = dict(payload["trace_headers"])
+            if trace_payload.get("call_id"):
+                payload["call_id"] = trace_payload["call_id"]
+            source_hash = _clean(source_request_hash)
+            if source_hash:
+                payload["source_request_hash"] = source_hash
+            endpoint = _clean(source_endpoint)
+            if endpoint:
+                payload["source_endpoint"] = endpoint[:255]
+            try:
+                started_at = float(request_started_at or 0.0)
+            except (TypeError, ValueError):
+                started_at = 0.0
+            if started_at > 0:
+                payload["request_started_at"] = started_at
+            if image_paths:
+                payload["input_artifacts"] = image_paths
+            if mask_paths:
+                payload["mask_artifacts"] = mask_paths
+            request = EnqueueRequest(
+                owner_key=owner,
+                idempotency_key=selected_key,
+                request_hash=request_hash,
+                task_type="edit" if mode == "edit" else "generation",
+                original_prompt=original_prompt,
+                effective_prompt=effective_prompt,
+                request_payload=payload,
+                required_jobs=count,
+                client_task_id=client_id,
+                public_model=public_model,
+                prompt_suffix_version=suffix_version,
+                task_id=task_id,
+                input_artifacts=input_artifacts,
+            )
             self._ensure_submission_capacity()
             if self._enqueue_accepts_max_backlog(repository):
                 result = repository.enqueue_task(request, max_backlog=self.settings.max_backlog)
             else:
                 result = repository.enqueue_task(request)
         except Exception:
-            self.artifact_service.discard(input_artifacts)
+            if input_artifacts:
+                self.artifact_service.discard(input_artifacts)
             raise
         if not result.created:
             self.artifact_service.discard(input_artifacts)

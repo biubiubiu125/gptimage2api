@@ -30,7 +30,7 @@ from services.account_operation_events import (
 from services.browser_fingerprint import CHROME146_IMPERSONATE, CHROME146_USER_AGENT
 from services.config import config
 from services.image_account_dispatch import AccountDispatchStats, rank_image_account_tokens
-from services.image_failure import ImageFailure, classify_image_exception, image_failure
+from services.image_failure import ImageFailure, classify_image_exception, classify_oauth_refresh_error, image_failure
 from services.http_target import build_http_target_request_options
 from services.log_service import (
     LOG_TYPE_ACCOUNT,
@@ -96,6 +96,11 @@ class OAuthRefreshError(RuntimeError):
         if self.description and self.description.casefold() != self.error_code.casefold():
             details.append(self.description)
         super().__init__(": ".join(details))
+        self.failure = classify_oauth_refresh_error(
+            self.status_code,
+            self.error_code,
+            str(self),
+        )
 
 
 class TerminalRefreshTokenError(OAuthRefreshError):
@@ -900,6 +905,10 @@ class AccountService:
     def _is_image_account_available(cls, account: dict) -> bool:
         if not cls._is_account_selectable(account, allow_limited=False):
             return False
+        if cls._recent_token_refresh_error(account):
+            access_token = str(account.get("access_token") or "").strip()
+            if not access_token or not cls._access_token_still_usable(access_token):
+                return False
         if bool(account.get("image_quota_unknown")):
             return True
         # quota 是展示/预估值，不能作为持久调度开关。
@@ -1201,6 +1210,11 @@ class AccountService:
         return remaining is not None and remaining <= cls._ACCESS_TOKEN_REFRESH_SKEW_SECONDS
 
     @classmethod
+    def _access_token_still_usable(cls, access_token: str) -> bool:
+        remaining = cls._token_expires_in(access_token)
+        return remaining is None or remaining > 0
+
+    @classmethod
     def _token_issued_at(cls, access_token: str) -> datetime | None:
         issued_at = access_token_issued_at(access_token)
         if issued_at is None:
@@ -1366,11 +1380,12 @@ class AccountService:
             limit=2000,
         )
 
-    def _recent_token_refresh_error(self, account: dict) -> bool:
-        last_error_at = self._parse_time(account.get("last_token_refresh_error_at"))
+    @classmethod
+    def _recent_token_refresh_error(cls, account: dict) -> bool:
+        last_error_at = cls._parse_time(account.get("last_token_refresh_error_at"))
         if last_error_at is None:
             return False
-        return (datetime.now(timezone.utc) - last_error_at).total_seconds() < self._TOKEN_REFRESH_ERROR_BACKOFF_SECONDS
+        return (datetime.now(timezone.utc) - last_error_at).total_seconds() < cls._TOKEN_REFRESH_ERROR_BACKOFF_SECONDS
 
     def _request_access_token_refresh(
         self,
@@ -1739,7 +1754,10 @@ class AccountService:
                         future = self._oauth_refresh_flights.get(key)
                         owner = future is None
                         if future is None:
-                            if image_busy or not needs_refresh or refresh_backoff:
+                            if image_busy or not needs_refresh or (
+                                refresh_backoff
+                                and self._access_token_still_usable(active_token)
+                            ):
                                 return active_token
                             future = Future()
                             self._oauth_refresh_flights[key] = future
@@ -1748,7 +1766,10 @@ class AccountService:
                     future = self._oauth_refresh_flights.get(key)
                     owner = future is None
                     if future is None:
-                        if not needs_refresh or refresh_backoff:
+                        if not needs_refresh or (
+                            refresh_backoff
+                            and self._access_token_still_usable(active_token)
+                        ):
                             return active_token
                         future = Future()
                         self._oauth_refresh_flights[key] = future
@@ -2406,9 +2427,9 @@ class AccountService:
     def is_unlimited_image_quota_account(cls, account: dict) -> bool:
         return cls._is_unlimited_image_quota_account(account)
 
-    def list_image_account_candidates(self) -> list[Any]:
+    def list_image_account_candidates(self, *, wait_for_refresh: bool = False) -> list[Any]:
         """Return queue-facing account candidates without borrowing request slots."""
-        self._refresh_accounts_snapshot_if_stale(wait_for_refresh=False)
+        self._refresh_accounts_snapshot_if_stale(wait_for_refresh=wait_for_refresh)
         from services.image_queue.types import ImageAccountCandidate
 
         with self._image_slot_condition:

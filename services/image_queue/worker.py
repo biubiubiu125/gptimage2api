@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import inspect
 import math
 import os
+from collections.abc import Collection, Mapping
 from threading import Event, RLock, Thread
 import time
 from typing import Any, Callable, Sequence, TypeVar
@@ -20,7 +21,7 @@ from services.image_queue.repository import (
 )
 from services.image_queue.resource_controller import ResourceController
 from services.image_queue.retry_policy import RetryPolicy
-from services.image_queue.scheduler import is_generation_stage, is_recovery_stage, plan_claim_dispatch
+from services.image_queue.scheduler import is_recovery_stage, plan_claim_dispatch
 from services.image_queue.settings import ImageQueueSettings
 from services.image_queue.types import ArtifactDescriptor, ClaimedJob, JobSnapshot, ResourceDecision
 from services.image_queue.types import JobStage, LocalArtifactRecoveryUnavailable
@@ -48,6 +49,45 @@ def compute_remaining_account_slots(
         0,
         int(available_accounts) * max(1, int(account_concurrency)) - occupied,
     )
+
+
+ACCOUNT_LEASE_RELEASED_STAGES = frozenset({
+    JobStage.TRANSFORMING.value,
+    JobStage.SAVING.value,
+    JobStage.SUCCESS.value,
+    JobStage.FAILED.value,
+    JobStage.CANCELED.value,
+})
+
+
+def occupied_in_process_account_slots(
+    claims: Sequence[Any],
+    *,
+    claim_stages: Mapping[object, object] | None = None,
+    candidate_ids: Collection[object] | None = None,
+) -> int:
+    occupied = 0
+    stages = claim_stages or {}
+    allowed_ids = None if candidate_ids is None else set(candidate_ids)
+    for claim in claims or ():
+        try:
+            if int(getattr(claim, "account_slot", -1)) < 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        account_id = getattr(claim, "account_id", None)
+        if allowed_ids is not None and account_id not in allowed_ids:
+            continue
+        job = getattr(claim, "job", None)
+        job_id = getattr(job, "id", None)
+        stage = stages.get(job_id) if job_id is not None else None
+        if stage is None:
+            stage = getattr(job, "stage", "")
+        stage_value = str(getattr(stage, "value", stage) or "")
+        if stage_value in ACCOUNT_LEASE_RELEASED_STAGES:
+            continue
+        occupied += 1
+    return occupied
 
 
 def occupied_account_slots_for_capacity(*, in_process: int, lease_count: int | None) -> int | None:
@@ -117,9 +157,9 @@ def bind_worker_resource_controller(
 
 def live_generation_allowed(
     resource_controller: Any,
-    *,
-    plan_allows: bool,
     snapshot: Any | None = None,
+    *,
+    plan_allows: bool = True,
 ) -> bool:
     if not plan_allows or resource_controller is None:
         return False
@@ -356,6 +396,7 @@ class ImageWorkerManager:
         self._futures: dict[Future[None], ClaimedJob] = {}
         self._claim_stages: dict[object, str] = {}
         self._claim_started_at: dict[object, float] = {}
+        self._claim_in_flight = False
         self._overdue_claims_logged: set[object] = set()
         self._recent_error = ""
         self._fatal_error = ""
@@ -680,12 +721,15 @@ class ImageWorkerManager:
             )
         )
 
+    def _claimed_executor_stage(self, claim: Any) -> object:
+        return getattr(getattr(claim, "job", None), "stage", "")
+
     def _active_recovery_count(self) -> int:
         with self._lock:
             return sum(
                 1
                 for claim in self._futures.values()
-                if is_recovery_stage(self._claim_stages.get(claim.job.id, claim.job.stage.value))
+                if is_recovery_stage(self._claimed_executor_stage(claim))
             )
 
     def submit_io(self, operation: Callable[[], T]) -> Future[T]:
@@ -704,7 +748,7 @@ class ImageWorkerManager:
             return sum(
                 1
                 for claim in self._futures.values()
-                if is_generation_stage(self._claim_stages.get(claim.job.id, claim.job.stage.value))
+                if not is_recovery_stage(self._claimed_executor_stage(claim))
             )
 
     def _allow_recovery(self, snapshot: object) -> ResourceDecision:
@@ -746,18 +790,23 @@ class ImageWorkerManager:
             "pending_claim_cap": self.pending_claim_cap,
         })
 
-    def stop(self, timeout: float | None = None) -> bool:
+    def _resume_dispatcher(self) -> None:
+        with self._lock:
+            self._worker_active = True
+        if self._dispatcher is None or not self._dispatcher.is_alive():
+            self._dispatcher = Thread(target=self._dispatch_loop, name="image-dispatcher", daemon=True)
+            self._dispatcher.start()
+
+    def stop(self, timeout: float | None = None, *, resume_if_undrained: bool = False) -> bool:
         with self._lock:
             self._worker_active = False
-        self._stop.set()
         self._wake.set()
         deadline = time.monotonic() + max(0.0, float(timeout or 0.0))
-        for thread in (self._dispatcher, self._heartbeat):
-            if thread and thread.is_alive():
-                remaining = max(0.0, deadline - time.monotonic()) if timeout is not None else None
-                thread.join(remaining)
+        if self._dispatcher and self._dispatcher.is_alive():
+            remaining = max(0.0, deadline - time.monotonic()) if timeout is not None else None
+            self._dispatcher.join(remaining)
         with self._lock:
-            pending = set(self._futures)
+            pending = {future for future in self._futures if not future.done()}
         while pending:
             remaining = None if timeout is None else max(0.0, deadline - time.monotonic())
             if remaining is not None and remaining <= 0:
@@ -767,6 +816,7 @@ class ImageWorkerManager:
                 remaining,
             )
             _, pending = wait(pending, timeout=max(0.01, float(interval)))
+            self._reap_completed_futures()
             if pending:
                 claims = self._active_claims()
                 if claims:
@@ -779,44 +829,41 @@ class ImageWorkerManager:
                             "claim_count": len(claims),
                             "error": str(exc),
                         })
-        drained = not pending
+        self._reap_completed_futures()
+        with self._lock:
+            pending = {future for future in self._futures if not future.done()}
+            dispatcher_alive = bool(self._dispatcher is not None and self._dispatcher.is_alive())
+            claim_in_flight = bool(getattr(self, "_claim_in_flight", False))
+        drained = not pending and not dispatcher_alive and not claim_in_flight
         if not drained:
-            # Do not leave timed-out shutdown claims leased until the normal
-            # lease expiry.  Release them now so a replacement manager can
-            # recover the checkpoint immediately; lease CAS still fences any
-            # late completion from the old executor thread.
-            with self._lock:
-                claims_to_release = list(self._futures.values())
-            for claim in claims_to_release:
-                try:
-                    self.repository.release_claim(claim)
-                except Exception as exc:
-                    logger.error({
-                        "event": "image_worker_shutdown_claim_release_failed",
-                        "worker_id": self.worker_id,
-                        "job_id": str(claim.job.id),
-                        "error": str(exc),
-                    })
-            with self._lock:
-                self._futures.clear()
-                self._claim_stages.clear()
-                self._claim_started_at.clear()
-                self._overdue_claims_logged.clear()
+            # Keep PostgreSQL account leases and in-process claims until the
+            # executor thread finishes. Releasing now would free the slot while
+            # paint continues, so another dispatcher could reuse the same account.
+            logger.warning({
+                "event": "image_worker_shutdown_timeout_keeps_leases",
+                "worker_id": self.worker_id,
+                "pending_claims": len(pending),
+                "dispatcher_alive": dispatcher_alive,
+                "claim_in_flight": claim_in_flight,
+                "resume_if_undrained": bool(resume_if_undrained),
+            })
+            if resume_if_undrained:
+                self._resume_dispatcher()
+            return False
+        self._stop.set()
+        self._wake.set()
+        if self._heartbeat and self._heartbeat.is_alive():
+            remaining = max(0.0, deadline - time.monotonic()) if timeout is not None else None
+            self._heartbeat.join(remaining)
         for executor in (
             self._generation_executor,
             self._recovery_executor,
             self._io_executor,
             self._upscale_executor,
         ):
-            executor.shutdown(wait=drained, cancel_futures=False)
+            executor.shutdown(wait=True, cancel_futures=False)
+        self._reap_completed_futures()
         with self._lock:
-            completed = [future for future in self._futures if future.done()]
-            for future in completed:
-                claim = self._futures.pop(future, None)
-                if claim is not None:
-                    self._claim_stages.pop(claim.job.id, None)
-                    self._claim_started_at.pop(claim.job.id, None)
-                    self._overdue_claims_logged.discard(claim.job.id)
             self._executors_shutdown = True
         mark_inactive = getattr(self.repository, "mark_worker_inactive", None)
         if callable(mark_inactive):
@@ -831,7 +878,7 @@ class ImageWorkerManager:
                     "worker_id": self.worker_id,
                     "error": str(exc),
                 })
-        return drained
+        return True
 
     def notify(self) -> None:
         self._wake.set()
@@ -846,38 +893,89 @@ class ImageWorkerManager:
                 return
             time.sleep(0.01)
 
+    def _occupied_in_process_account_slots(
+        self,
+        *,
+        candidate_ids: Collection[object] | None = None,
+    ) -> int:
+        with self._lock:
+            futures = getattr(self, "_futures", None) or {}
+            return occupied_in_process_account_slots(
+                list(futures.values()),
+                claim_stages=getattr(self, "_claim_stages", None),
+                candidate_ids=candidate_ids,
+            )
+
+    def live_account_slot_capacity(self) -> tuple[int, int]:
+        try:
+            candidates = self.account_service.list_image_account_candidates()
+        except Exception:
+            candidates = ()
+        available = len(candidates)
+        candidate_ids = {
+            getattr(item, "account_id", None)
+            for item in candidates
+        }
+        candidate_ids.discard(None)
+        account_concurrency = current_image_account_concurrency(self.account_concurrency)
+        self.account_concurrency = account_concurrency
+        lease_count = count_leases_for_candidates(
+            getattr(self.repository, "count_account_leases", None),
+            candidates,
+        )
+        occupied_slots = occupied_account_slots_for_capacity(
+            in_process=self._occupied_in_process_account_slots(candidate_ids=candidate_ids),
+            lease_count=lease_count,
+        )
+        remaining = compute_remaining_account_slots(
+            available_accounts=available,
+            account_concurrency=account_concurrency,
+            occupied_slots=occupied_slots,
+        )
+        return remaining, available
+
+    def _log_overdue_claim(self, claim: ClaimedJob, *, max_runtime: float) -> None:
+        job_id = claim.job.id
+        with self._lock:
+            first = job_id not in self._overdue_claims_logged
+            if first:
+                self._overdue_claims_logged.add(job_id)
+        if not first:
+            return
+        logger.error({
+            "event": "image_worker_claim_max_runtime_exceeded",
+            "worker_id": self.worker_id,
+            "task_id": str(claim.job.task_id),
+            "job_id": str(job_id),
+            "lease_version": claim.lease_version,
+            "max_runtime_seconds": max_runtime,
+        })
+
     def _active_claims(self) -> list[ClaimedJob]:
-        """Return in-flight claims that are still allowed to extend leases."""
+        """Return in-flight claims that still occupy leases, including overdue ones.
+
+        Overdue claims keep heartbeating until the executor thread finishes.
+        ``ClaimMaxRuntimeExceeded`` from ``runtime_guard`` then fails the job
+        and releases the PostgreSQL account lease. Releasing the lease from
+        heartbeat while the paint is still running lets another worker take the
+        same account slot and discards a late image.
+        """
         now = time.monotonic()
         max_runtime = max(1.0, float(self.settings.claim_max_runtime_seconds))
         overdue: list[ClaimedJob] = []
-        heartbeatable: list[ClaimedJob] = []
         with self._lock:
             active = list(self._futures.values())
             for claim in active:
                 started_at = self._claim_started_at.get(claim.job.id, now)
                 if now - started_at >= max_runtime:
-                    if claim.job.id not in self._overdue_claims_logged:
-                        overdue.append(claim)
-                    continue
-                heartbeatable.append(claim)
+                    overdue.append(claim)
         for claim in overdue:
-            with self._lock:
-                if claim.job.id in self._overdue_claims_logged:
-                    continue
-                self._overdue_claims_logged.add(claim.job.id)
-            logger.error({
-                "event": "image_worker_claim_max_runtime_exceeded",
-                "worker_id": self.worker_id,
-                "task_id": str(claim.job.task_id),
-                "job_id": str(claim.job.id),
-                "lease_version": claim.lease_version,
-                "max_runtime_seconds": max_runtime,
-            })
-        return heartbeatable
+            self._log_overdue_claim(claim, max_runtime=max_runtime)
+        return active
 
     def _heartbeat_loop(self) -> None:
         while not self._stop.is_set():
+            self._reap_completed_futures()
             self._heartbeat_worker_state()
             claims = self._active_claims()
             if claims:
@@ -940,6 +1038,8 @@ class ImageWorkerManager:
     def _dispatch_loop(self) -> None:
         backoff_seconds = max(1.0, float(self.settings.poll_interval_seconds))
         while not self._stop.is_set():
+            if not self._worker_active:
+                return
             try:
                 self._dispatch_once()
                 backoff_seconds = max(1.0, float(self.settings.poll_interval_seconds))
@@ -982,7 +1082,7 @@ class ImageWorkerManager:
                     "error": str(exc),
                 })
 
-    def _dispatch_once(self) -> None:
+    def _reap_completed_futures(self) -> None:
         with self._lock:
             completed = [future for future in self._futures if future.done()]
             for future in completed:
@@ -999,6 +1099,12 @@ class ImageWorkerManager:
                         "job_id": str(claim.job.id) if claim is not None else "",
                         "error": str(error),
                     })
+
+    def _dispatch_once(self) -> None:
+        self._reap_completed_futures()
+        if not self._worker_active:
+            return
+        with self._lock:
             capacity = self.pending_claim_cap - len(self._futures)
         now = time.monotonic()
         self._expire_pending_tasks()
@@ -1073,19 +1179,26 @@ class ImageWorkerManager:
         )
         effective_generation_limit = max(0, int(plan.generation_limit))
         active_generation_count = self._active_generation_count()
+        wait_for_account_refresh = bool(plan.allow_generation)
         try:
-            candidates = self.account_service.list_image_account_candidates()
+            candidates = self.account_service.list_image_account_candidates(
+                wait_for_refresh=wait_for_account_refresh,
+            )
         except Exception:
             candidates = ()
+        live_generation_open = live_generation_allowed(self.resource_controller)
+        candidate_ids = {
+            getattr(item, "account_id", None)
+            for item in candidates
+        }
+        candidate_ids.discard(None)
         with self._lock:
             current_concurrency = len(self._futures)
-            occupied_account_slots = 0
-            for claim in self._futures.values():
-                try:
-                    if int(getattr(claim, "account_slot", -1)) >= 0:
-                        occupied_account_slots += 1
-                except (TypeError, ValueError):
-                    continue
+            occupied_account_slots = occupied_in_process_account_slots(
+                list(self._futures.values()),
+                claim_stages=self._claim_stages,
+                candidate_ids=candidate_ids,
+            )
         snapshot_data["current_concurrency"] = current_concurrency
         snapshot_data["current_generation_concurrency"] = active_generation_count
         snapshot_data["effective_concurrency"] = effective_generation_limit
@@ -1126,6 +1239,9 @@ class ImageWorkerManager:
             getattr(self.resource_controller, "occupancy_paused", False)
         )
         snapshot_data["occupancy_paused"] = occupancy_paused
+        snapshot_data["occupancy_latch_source"] = str(
+            getattr(self.resource_controller, "occupancy_latch_source", "") or ""
+        )
         snapshot_data["effective_generation"] = (
             0
             if occupancy_paused or not generation_decision.allowed
@@ -1152,9 +1268,10 @@ class ImageWorkerManager:
         recovery_capacity = self.recovery_thread_cap - self._active_recovery_count()
         allow_recovery = plan.allow_recovery and recovery_capacity > 0
         allow_generation = allow_generation_claim(
-            occupancy_allows=live_generation_allowed(
-                self.resource_controller,
-                plan_allows=plan.allow_generation,
+            occupancy_allows=(
+                plan.allow_generation
+                and live_generation_open
+                and live_generation_allowed(self.resource_controller, snapshot)
             ),
             remaining_account_slots=remaining_account_slots,
         )
@@ -1162,71 +1279,76 @@ class ImageWorkerManager:
             self._wake.wait(self.settings.poll_interval_seconds)
             self._wake.clear()
             return
+        if not self._worker_active:
+            return
+        with self._lock:
+            self._claim_in_flight = True
         try:
-            claim = self.repository.claim_next_job(
-                self.worker_id,
-                candidates,
-                account_concurrency,
-                allow_generation=allow_generation,
-                recovery_only=allow_recovery and not allow_generation,
-                prefer_recovery=allow_recovery,
-                local_artifact_available=self.local_recovery_available_callback,
-                allow_unowned_local_artifacts=False,
-                expected_process_instance_id=self.process_instance_id,
-            )
-        except Exception as exc:
-            self._recent_error = str(exc)[:300]
-            # claim_next_job already swallows IntegrityError races; any remaining
-            # failure must not tear down the dispatcher with long backoff only.
-            logger.error({
-                "event": "image_worker_claim_next_failed",
-                "worker_id": self.worker_id,
-                "error": str(exc),
-            })
-            self._wake.wait(self.settings.poll_interval_seconds)
-            self._wake.clear()
-            return
-        if claim is None:
-            self._wake.wait(self.settings.poll_interval_seconds)
-            self._wake.clear()
-            return
-        if not is_recovery_stage(claim.job.stage) and not live_generation_allowed(
-            self.resource_controller,
-            plan_allows=True,
-        ):
             try:
-                release_claim_for_occupancy(self.repository, claim)
+                claim = self.repository.claim_next_job(
+                    self.worker_id,
+                    candidates,
+                    account_concurrency,
+                    allow_generation=allow_generation,
+                    recovery_only=allow_recovery and not allow_generation,
+                    prefer_recovery=allow_recovery,
+                    local_artifact_available=self.local_recovery_available_callback,
+                    allow_unowned_local_artifacts=False,
+                    expected_process_instance_id=self.process_instance_id,
+                )
             except Exception as exc:
+                self._recent_error = str(exc)[:300]
+                # claim_next_job already swallows IntegrityError races; any remaining
+                # failure must not tear down the dispatcher with long backoff only.
                 logger.error({
-                    "event": "image_worker_occupancy_release_failed",
-                    "job_id": str(claim.job.id),
+                    "event": "image_worker_claim_next_failed",
+                    "worker_id": self.worker_id,
                     "error": str(exc),
                 })
-            self._wake.wait(self.settings.poll_interval_seconds)
-            self._wake.clear()
-            return
-        # Route recovery/saving work to the dedicated recovery pool so generation
-        # pressure cannot starve checkpoint resume.
-        if is_recovery_stage(claim.job.stage):
-            if recovery_capacity <= 0:
+                self._wake.wait(self.settings.poll_interval_seconds)
+                self._wake.clear()
+                return
+            if claim is None:
+                self._wake.wait(self.settings.poll_interval_seconds)
+                self._wake.clear()
+                return
+            if not is_recovery_stage(claim.job.stage) and not live_generation_allowed(self.resource_controller):
                 try:
                     release_claim_for_occupancy(self.repository, claim)
                 except Exception as exc:
                     logger.error({
-                        "event": "image_worker_recovery_release_failed",
+                        "event": "image_worker_occupancy_release_failed",
                         "job_id": str(claim.job.id),
                         "error": str(exc),
                     })
                 self._wake.wait(self.settings.poll_interval_seconds)
                 self._wake.clear()
                 return
-            future = self._recovery_executor.submit(self._run_claim, claim)
-        else:
-            future = self._generation_executor.submit(self._run_claim, claim)
-        with self._lock:
-            self._futures[future] = claim
-            self._claim_stages.setdefault(claim.job.id, claim.job.stage.value)
-            self._claim_started_at[claim.job.id] = time.monotonic()
+            # Route recovery/saving work to the dedicated recovery pool so generation
+            # pressure cannot starve checkpoint resume.
+            if is_recovery_stage(claim.job.stage):
+                if recovery_capacity <= 0:
+                    try:
+                        release_claim_for_occupancy(self.repository, claim)
+                    except Exception as exc:
+                        logger.error({
+                            "event": "image_worker_recovery_release_failed",
+                            "job_id": str(claim.job.id),
+                            "error": str(exc),
+                        })
+                    self._wake.wait(self.settings.poll_interval_seconds)
+                    self._wake.clear()
+                    return
+                future = self._recovery_executor.submit(self._run_claim, claim)
+            else:
+                future = self._generation_executor.submit(self._run_claim, claim)
+            with self._lock:
+                self._futures[future] = claim
+                self._claim_stages.setdefault(claim.job.id, claim.job.stage.value)
+                self._claim_started_at[claim.job.id] = time.monotonic()
+        finally:
+            with self._lock:
+                self._claim_in_flight = False
 
     def _run_claim(self, claim: ClaimedJob) -> None:
         initial_stage = claim.job.stage

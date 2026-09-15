@@ -366,6 +366,18 @@ def iter_sse_payloads(
             response._stream_closed = True
         except Exception:
             pass
+        stream_task = getattr(response, "stream_task", None)
+        join = getattr(stream_task, "join", None) if stream_task is not None else None
+        if callable(join):
+            try:
+                join(1.0)
+            except TypeError:
+                try:
+                    join(timeout=1.0)
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
     def _iter_chunks() -> Iterator[bytes]:
         stream_queue = getattr(response, "queue", None)

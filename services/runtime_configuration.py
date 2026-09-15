@@ -50,4 +50,4 @@ def resolve_thread_tokens(*, cpu_cores: int | None = None) -> int:
         return parsed
     from services.image_queue.settings import resolve_generation_concurrency_limit
 
-    return max(1, resolve_generation_concurrency_limit(cpu_cores=cpu_cores) * 2)
+    return max(1, resolve_generation_concurrency_limit(cpu_cores=cpu_cores))

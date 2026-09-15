@@ -8,12 +8,12 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.image_inputs import image_edit_source_request_hash, parse_image_edit_request, read_image_source_groups
+from api.image_tasks import _IMAGE_QUEUE_ERRORS, _image_queue_http_exception
 from api.support import allowlisted_trace_headers, require_identity, resolve_api_base_url, resolve_image_base_url
 from services.content_filter import check_request, request_shape, request_text
 from services.editable_file_task_service import EditableFileTaskConflict, editable_file_task_service
 from services.image_queue.idempotency import ensure_idempotency_key, select_idempotency_key
 from services.image_queue.repository import IdempotencyConflict
-from services.image_queue.resource_controller import ImageQueueResourcePressureError
 from services.image_task_service import image_task_service
 from services.log_service import LoggedCall
 from services.protocol import (
@@ -592,12 +592,9 @@ def create_router() -> APIRouter:
         except EditableFileTaskConflict as exc:
             quota.cancel()
             raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
-        except ImageQueueResourcePressureError as exc:
+        except _IMAGE_QUEUE_ERRORS as exc:
             quota.cancel()
-            raise HTTPException(
-                status_code=503,
-                detail={"error": exc.code, "reason": exc.reason, "message": str(exc)},
-            ) from exc
+            raise _image_queue_http_exception(exc) from exc
         except ValueError as exc:
             quota.cancel()
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
@@ -643,12 +640,9 @@ def create_router() -> APIRouter:
         except EditableFileTaskConflict as exc:
             quota.cancel()
             raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
-        except ImageQueueResourcePressureError as exc:
+        except _IMAGE_QUEUE_ERRORS as exc:
             quota.cancel()
-            raise HTTPException(
-                status_code=503,
-                detail={"error": exc.code, "reason": exc.reason, "message": str(exc)},
-            ) from exc
+            raise _image_queue_http_exception(exc) from exc
         except ValueError as exc:
             quota.cancel()
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
@@ -684,12 +678,9 @@ def create_router() -> APIRouter:
         except EditableFileTaskConflict as exc:
             quota.cancel()
             raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
-        except ImageQueueResourcePressureError as exc:
+        except _IMAGE_QUEUE_ERRORS as exc:
             quota.cancel()
-            raise HTTPException(
-                status_code=503,
-                detail={"error": exc.code, "reason": exc.reason, "message": str(exc)},
-            ) from exc
+            raise _image_queue_http_exception(exc) from exc
         except ValueError as exc:
             quota.cancel()
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc

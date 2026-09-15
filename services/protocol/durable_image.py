@@ -405,10 +405,10 @@ def execute(
     task_id = str(submission["task_id"])
     response_format = _resolve_response_format(submission, request_payload, response_format)
     try:
-        terminal = image_task_service.wait_for_terminal(
+        terminal = _wait_for_terminal_from_worker_thread(
             identity,
             task_id,
-            timeout=_protocol_wait_timeout(),
+            _protocol_wait_timeout(),
         )
         return _result(identity, task_id, terminal, request_payload, response_format)
     except Exception as exc:
@@ -502,6 +502,24 @@ def _progress_fields(identity: Mapping[str, object], task_id: str) -> dict[str, 
     return fields
 
 
+def _wait_for_terminal_from_worker_thread(
+    identity: Mapping[str, object] | str,
+    task_id: object,
+    timeout: float | None,
+) -> dict[str, Any]:
+    wait_async = getattr(image_task_service, "wait_for_terminal_async", None)
+    if callable(wait_async):
+        try:
+            import anyio
+
+            return anyio.from_thread.run(wait_async, identity, task_id, timeout)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "image task wait must run from a worker thread, not the event loop"
+            ) from exc
+    return image_task_service.wait_for_terminal(identity, task_id, timeout=timeout)
+
+
 def stream_outputs(
     body: dict[str, Any],
     payload: Mapping[str, Any],
@@ -539,10 +557,10 @@ def stream_outputs(
         if remaining <= 0:
             raise _task_error(TimeoutError("image task is still running"), task_id)
         try:
-            terminal = image_task_service.wait_for_terminal(
+            terminal = _wait_for_terminal_from_worker_thread(
                 identity,
                 task_id,
-                timeout=min(heartbeat_seconds, remaining),
+                min(heartbeat_seconds, remaining),
             )
         except TimeoutError:
             if time.monotonic() >= deadline:

@@ -255,6 +255,18 @@ def create_router(app_version: str) -> APIRouter:
 
     @router.get("/health")
     async def health():
+        is_restore_active = getattr(backup_service, "is_restore_active", None)
+        if callable(is_restore_active) and is_restore_active():
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "ok",
+                    "healthy": True,
+                    "version": app_version,
+                    "application_database": {"status": "healthy", "healthy": True},
+                    "image_queue": {"status": "restoring", "healthy": True},
+                },
+            )
         try:
             application_database = await run_in_threadpool(
                 config.get_storage_backend().health_check

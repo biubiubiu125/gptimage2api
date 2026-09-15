@@ -183,7 +183,7 @@ FAILURE_POLICIES: dict[str, FailurePolicy] = {
         "request", None, False, 503, "server_error",
     ),
     "no_available_account": FailurePolicy(
-        "transient", None, False, 503, "server_error",
+        "transient", None, True, 503, "server_error",
     ),
     "insufficient_quota": FailurePolicy(
         "account", "image_generation", False, 429, "insufficient_quota",
@@ -729,6 +729,34 @@ def classify_upstream_http_error(exc: UpstreamHTTPError) -> ImageFailure:
     )
 
 
+def classify_oauth_refresh_error(
+    status_code: int,
+    error_code: str = "",
+    raw_detail: Any = None,
+) -> ImageFailure:
+    status = int(status_code or 0)
+    normalized = str(error_code or "").strip().lower()
+    aliased = FAILURE_CODE_ALIASES.get(normalized, normalized)
+    policy = FAILURE_POLICIES.get(aliased)
+    if (
+        policy is not None
+        and policy.status_code != 400
+        and (policy.retryable or policy.verify_account)
+    ):
+        return image_failure(aliased, raw_detail=raw_detail)
+    if status == 401:
+        return image_failure("auth_invalid", raw_detail=raw_detail)
+    if status == 429:
+        return image_failure("upstream_rate_limited", raw_detail=raw_detail)
+    if status in {408, 504}:
+        return image_failure("upstream_connection_timeout", raw_detail=raw_detail)
+    if status in {403, 423} or status >= 500:
+        return image_failure("upstream_unavailable", raw_detail=raw_detail)
+    if status:
+        return image_failure("upstream_error", raw_detail=raw_detail)
+    return image_failure("upstream_unavailable", raw_detail=raw_detail)
+
+
 def classify_image_exception(exc: BaseException, *, code: str | None = None) -> ImageFailure:
     failure = getattr(exc, "failure", None)
     if isinstance(failure, ImageFailure):
@@ -743,6 +771,14 @@ def classify_image_exception(exc: BaseException, *, code: str | None = None) -> 
 
     if isinstance(exc, UpstreamHTTPError):
         return remember(classify_upstream_http_error(exc))
+    if type(exc).__name__ == "OAuthRefreshError":
+        return remember(
+            classify_oauth_refresh_error(
+                int(getattr(exc, "status_code", 0) or 0),
+                str(getattr(exc, "error_code", "") or ""),
+                str(exc),
+            )
+        )
     structured_code = code or getattr(exc, "code", None)
     if isinstance(structured_code, str) and structured_code.strip().lower() in (
         FAILURE_POLICIES.keys() | FAILURE_CODE_ALIASES.keys()
