@@ -94,7 +94,7 @@ Shared UI components, themes, and interaction primitives come from [yukkcat/nano
 | 🔌 | API gateway | Chat Completions, Responses, Messages, search, image generation and editing, PPT/PSD generation, and unified editable-file tasks |
 | 💬 | Chat and image studio | Text chat, web search, text-to-image, image-to-image, multiple references, local editing, Markdown, syntax highlighting, citations, and reasoning effort |
 | 👥 | Account management | Manual, OAuth, Access Token, Session JSON, CPA, remote CPA, and Sub2API imports, plus search, filters, groups, exports, and batch actions |
-| 📨 | Registration | Requires a residential proxy URL (not the default egress or a proxy group); supports only `yyds_mail`, `remail`, `outlook_token`, and `icloud_api`, then writes verified accounts into the upstream pool |
+| 📨 | Register accounts | Requires a residential proxy URL (not the default egress or a proxy group); supports only `yyds_mail`, `remail`, `outlook_token`, and `icloud_api`, then writes verified accounts into the upstream pool |
 | 🔑 | Credentials and quotas | Separate AT/RT states, RT-based AT renewal, plan and quota synchronization, pinned-account text/image tests, and invalid-account handling |
 | ⚙️ | Scheduling and concurrency | Multi-account selection, account-processing concurrency, per-account image concurrency, parallel images, account switching, quotas, and rate-limit state |
 | 🌐 | Proxy egress | Account and account-group proxies, multi-egress proxy groups, per-node image concurrency, rotation, default and fallback egress, and connectivity checks |

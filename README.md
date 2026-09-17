@@ -4,7 +4,7 @@
 
 <h1 align="center">GPTImage2API</h1>
 
-<p align="center">将 ChatGPT 官网能力接入 OpenAI 兼容 API，并提供面向多账号、注册机、图片任务与自托管场景的管理控制台。</p>
+<p align="center">将 ChatGPT 官网能力接入 OpenAI 兼容 API，并提供面向多账号、注册账号、图片任务与自托管场景的管理控制台。</p>
 
 <p align="center">
   <strong>简体中文</strong> · <a href="./README_EN.md">English</a>
@@ -90,7 +90,7 @@ docker compose -f docker-compose.remote.yml up -d
 |   🔌   | API 网关   | Chat Completions、Responses、Messages、搜索、图片生成、图片编辑、PPT / PSD 与统一可编辑文件任务                |
 |   💬   | 对话画图   | 文本对话、联网搜索、文生图、图生图、多图参考、局部编辑、Markdown、代码高亮、引用来源和推理强度                 |
 |   👥   | 账号管理   | 手动添加、OAuth、Access Token、Session JSON、CPA、远程 CPA、Sub2API 导入，以及搜索、筛选、分组、导出和批量处理 |
-|   📨   | 注册机     | 必须配置住宅代理 URL（不能用默认出口或代理组）；仅支持 `yyds_mail`、`remail`、`outlook_token`、`icloud_api`，成功注册自动进入上游账号池 |
+|   📨   | 注册账号   | 必须配置住宅代理 URL（不能用默认出口或代理组）；仅支持 `yyds_mail`、`remail`、`outlook_token`、`icloud_api`，成功注册自动进入上游账号池 |
 |   🔑   | 凭证与额度 | 独立展示 AT / RT 状态，支持 RT 刷新 AT、同步套餐与额度、指定账号文本/画图测试和异常账号处置                    |
 |   ⚙️   | 调度与并发 | 多账号选择、账号处理并发、单账号图片并发、多图并行、失败换号、额度与限流状态管理                               |
 |   🌐   | 代理出口   | 账号代理、账号组代理、多出口代理组、节点图片并发、轮换间隔、默认出口、备用出口和连通性检测                     |

@@ -1,7 +1,7 @@
 # AGENTS.md
 
 本文件约束 `gptimage2api` 仓库中的 AI 和自动化开发行为，作用域为整个仓库。
-本仓库把 ChatGPT 官网能力接入 OpenAI 兼容 API，并提供账号池、注册机、图片任务与自托管控制台。
+本仓库把 ChatGPT 官网能力接入 OpenAI 兼容 API，并提供账号池、注册账号、图片任务与自托管控制台。
 用户当前指令优先；更深目录若存在 `AGENTS.md`，则在其作用域内补充或覆盖本文件。
 领域术语和所有权以 `CONTEXT.md` 为准；可执行细则在 `.codex/rules/`；部署与运维步骤在 `docs/deployment.md` 和 `docs/runbooks/`，不写进本文件。
 
