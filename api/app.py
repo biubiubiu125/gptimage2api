@@ -79,6 +79,11 @@ class _BackupRestoreMaintenance:
             self._stopped = False
             self._stop_error = ""
 
+    def allow_another_restore(self) -> None:
+        with self._lock:
+            self._stopped = False
+            self._stop_error = ""
+
     def resume_background_threads(self) -> None:
         with self._lock:
             stop_event = self._stop_event
@@ -110,6 +115,9 @@ class _BackupRestoreMaintenance:
             threads = self._threads
             service_stops = self._service_stops
 
+        if stop_event is not None:
+            stop_event.set()
+
         failures: list[str] = []
         restart: list[tuple[str, Callable[[], object]]] = []
         for item in service_stops:
@@ -128,8 +136,6 @@ class _BackupRestoreMaintenance:
                 restart.append((name, start))
 
         if not failures:
-            if stop_event is not None:
-                stop_event.set()
             for thread in threads:
                 try:
                     thread.join(BACKUP_RESTORE_THREAD_JOIN_TIMEOUT_SECS)
@@ -166,17 +172,19 @@ def _prepare_backup_restore_maintenance() -> None:
 
 def _finish_backup_restore_maintenance() -> None:
     try:
-        start = image_task_service.start
-        try:
-            start(reclaim_restored_leases=True)
-        except TypeError:
-            start()
+        image_task_service.start(reclaim_restored_leases=True)
     except Exception as exc:
         logger.error({
             "event": "backup_restore_queue_restart_failed",
             "error_type": exc.__class__.__name__,
             "error": str(exc),
         })
+        logger.warning({
+            "event": "backup_restore_maintenance_finished",
+            "requires_restart": True,
+            "queue_restarted": False,
+        })
+        return
     try:
         register_service.start()
     except Exception as exc:
@@ -209,6 +217,9 @@ def _finish_backup_restore_maintenance() -> None:
             "error_type": exc.__class__.__name__,
             "error": str(exc),
         })
+    allow_another = getattr(_backup_restore_maintenance, "allow_another_restore", None)
+    if callable(allow_another):
+        allow_another()
     logger.warning({
         "event": "backup_restore_maintenance_finished",
         "requires_restart": True,
@@ -320,14 +331,14 @@ def create_app() -> FastAPI:
                 ),
                 service_stops=(
                     (
-                        "image_queue",
-                        lambda: image_task_service.stop(30, resume_if_undrained=True),
-                        image_task_service.start,
-                    ),
-                    (
                         "register",
                         lambda: register_service.shutdown(30),
                         register_service.start,
+                    ),
+                    (
+                        "image_queue",
+                        lambda: image_task_service.stop(30, resume_if_undrained=True),
+                        image_task_service.start,
                     ),
                     ("genbox", shutdown_genbox_push_service),
                     ("backup", backup_service.stop, backup_service.start),

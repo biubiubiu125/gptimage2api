@@ -479,8 +479,146 @@ class ImageTaskService:
             raise ImageQueueUnavailableError("image queue PostgreSQL is not started")
         return self.repository
 
+    def _queue_runtime_is_healthy(self) -> bool:
+        if not bool(getattr(self, "_started", False)):
+            return False
+        database = getattr(self, "database", None)
+        if database is None:
+            return False
+        if hasattr(database, "started") and not bool(database.started):
+            return False
+        worker = getattr(self, "worker", None)
+        if worker is None:
+            return False
+        if str(getattr(worker, "fatal_error", "") or "").strip():
+            return False
+        if getattr(worker, "_worker_active", True) is False:
+            return False
+        dispatcher = getattr(worker, "_dispatcher", None)
+        is_alive = getattr(dispatcher, "is_alive", None)
+        if not callable(is_alive) or not is_alive():
+            return False
+        heartbeat = getattr(worker, "_heartbeat", None)
+        hb_alive = getattr(heartbeat, "is_alive", None)
+        if callable(hb_alive) and not hb_alive():
+            return False
+        return True
+
+    def _reset_unhealthy_queue_runtime(self) -> bool:
+        worker = getattr(self, "worker", None)
+        if worker is not None:
+            stop = getattr(worker, "stop", None)
+            if callable(stop):
+                timeout = 0.5
+                settings = getattr(worker, "settings", None)
+                try:
+                    timeout = max(0.5, float(getattr(settings, "heartbeat_seconds", 0.5) or 0.5))
+                except (TypeError, ValueError):
+                    timeout = 0.5
+                try:
+                    drained = stop(timeout) is not False
+                except TypeError:
+                    drained = stop(timeout) is not False
+                except Exception as exc:
+                    logger.warning({
+                        "event": "image_queue_unhealthy_worker_stop_failed",
+                        "error": str(exc),
+                    })
+                    return False
+                if drained is False:
+                    return False
+            heartbeat = getattr(worker, "_heartbeat", None)
+            hb_alive = getattr(heartbeat, "is_alive", None)
+            if callable(hb_alive) and hb_alive():
+                return False
+        if self.has_active_claims():
+            return False
+        self._started = False
+        return True
+
+    def _has_only_leftover_heartbeat(self) -> bool:
+        worker = getattr(self, "worker", None)
+        if worker is None:
+            return False
+        lock = getattr(worker, "_lock", None)
+
+        def _only_leftover() -> bool:
+            heartbeat = getattr(worker, "_heartbeat", None)
+            hb_alive = getattr(heartbeat, "is_alive", None)
+            if not callable(hb_alive) or not hb_alive():
+                return False
+            dispatcher = getattr(worker, "_dispatcher", None)
+            disp_alive = getattr(dispatcher, "is_alive", None)
+            if callable(disp_alive) and disp_alive():
+                return False
+            if bool(getattr(worker, "_claim_in_flight", False)):
+                return False
+            if getattr(worker, "_stranded_claims", None):
+                return False
+            futures = getattr(worker, "_futures", None) or {}
+            if any(not future.done() for future in futures):
+                return False
+            return True
+
+        if lock is not None:
+            with lock:
+                return _only_leftover()
+        return _only_leftover()
+
+    def _dispatch_cannot_accept_new_work(self) -> bool:
+        worker = getattr(self, "worker", None)
+        if worker is None:
+            return False
+        if str(getattr(worker, "fatal_error", "") or "").strip():
+            return True
+        if getattr(worker, "_worker_active", True) is False:
+            return True
+        dispatcher = getattr(worker, "_dispatcher", None)
+        is_alive = getattr(dispatcher, "is_alive", None)
+        if callable(is_alive) and not is_alive():
+            return True
+        return False
+
+    def _dispatch_runtime_unavailable(self) -> bool:
+        if self._dispatch_cannot_accept_new_work():
+            return True
+        worker = getattr(self, "worker", None)
+        if worker is None:
+            return False
+        heartbeat = getattr(worker, "_heartbeat", None)
+        hb_alive = getattr(heartbeat, "is_alive", None)
+        if callable(hb_alive) and not hb_alive():
+            return True
+        return False
+
+    def _restore_in_progress(self) -> bool:
+        try:
+            from services.backup_service import backup_service as live_backup
+
+            checker = getattr(live_backup, "is_restore_active", None)
+            return callable(checker) and bool(checker())
+        except Exception:
+            return False
+
+    def _ensure_worker_heartbeat(self) -> None:
+        worker = getattr(self, "worker", None)
+        ensure = getattr(worker, "_ensure_heartbeat_thread", None)
+        if not callable(ensure):
+            return
+        try:
+            ensure()
+        except Exception as exc:
+            logger.warning({
+                "event": "image_queue_heartbeat_restart_failed",
+                "error": str(exc),
+            })
+
     def start(self, *, reclaim_restored_leases: bool = False) -> None:
-        if self._started:
+        if self._queue_runtime_is_healthy():
+            return
+        if self.has_active_claims() and not self._has_only_leftover_heartbeat():
+            return
+        if self._started and not self._reset_unhealthy_queue_runtime():
             return
         self._startup_error = None
         try:
@@ -521,12 +659,16 @@ class ImageTaskService:
             import_legacy_tasks = getattr(self.recovery, "import_legacy_tasks", None)
             if callable(import_legacy_tasks):
                 import_legacy_tasks(self.settings.legacy_task_path)
+            from services.image_queue.recovery import (
+                clear_queue_restore_reclaim_marker,
+                queue_restore_needs_reclaim,
+            )
             recover = getattr(self.recovery, "recover", None)
+            reclaim_restored = bool(reclaim_restored_leases) or bool(queue_restore_needs_reclaim())
             if callable(recover):
-                try:
-                    recover(reclaim_restored=bool(reclaim_restored_leases))
-                except TypeError:
-                    recover()
+                recover(reclaim_restored=reclaim_restored)
+                if reclaim_restored:
+                    clear_queue_restore_reclaim_marker()
             self._run_worker_maintenance()
             pending_ttl_seconds = int(self.settings.pending_ttl_seconds)
             if pending_ttl_seconds > 0:
@@ -597,8 +739,14 @@ class ImageTaskService:
             is_alive = getattr(dispatcher, "is_alive", None)
             if callable(is_alive) and is_alive():
                 return True
+            heartbeat = getattr(worker, "_heartbeat", None)
+            hb_alive = getattr(heartbeat, "is_alive", None)
+            if callable(hb_alive) and hb_alive():
+                return True
             futures = getattr(worker, "_futures", None) or {}
-            return any(not future.done() for future in futures)
+            if any(not future.done() for future in futures):
+                return True
+            return bool(getattr(worker, "_stranded_claims", None) or {})
 
         if lock is not None:
             with lock:
@@ -626,6 +774,7 @@ class ImageTaskService:
                 "healthy": False,
                 "error": str(self._startup_error),
             }
+        self._ensure_worker_heartbeat()
         worker_fatal_error = str(getattr(self.worker, "fatal_error", "") or "").strip()
         if worker_fatal_error:
             return {
@@ -660,6 +809,12 @@ class ImageTaskService:
                     "healthy": False,
                     "error": str(exc),
                 }
+        if self._dispatch_runtime_unavailable():
+            return {
+                "status": "unavailable",
+                "healthy": False,
+                "error": "image queue worker is unavailable",
+            }
         return {"status": "ok", "healthy": True}
 
     @staticmethod
@@ -1569,6 +1724,7 @@ class ImageTaskService:
         }
 
     def queue_capacity_view(self) -> dict[str, object]:
+        self._ensure_worker_heartbeat()
         worker = getattr(self, "worker", None)
         if worker is None:
             return self._queue_capacity_view_without_worker()
@@ -1598,8 +1754,13 @@ class ImageTaskService:
                 remaining_slots = int(live_remaining)
                 available_accounts = int(live_available)
             except Exception:
-                remaining_slots = 0
-                available_accounts = 0
+                pass
+        live_generation = getattr(worker, "_active_generation_count", None)
+        if callable(live_generation):
+            try:
+                current_generation = int(live_generation())
+            except Exception:
+                pass
         controller = getattr(worker, "resource_controller", None)
         if controller is not None:
             live_paused, live_reason, _generation = self._live_generation_gate(controller)
@@ -1612,6 +1773,9 @@ class ImageTaskService:
             elif live_paused:
                 pause_reason = pause_reason or "resource_occupancy"
         occupancy_paused, pause_reason = self._overlay_backlog_gate(occupancy_paused, pause_reason)
+        if self._dispatch_cannot_accept_new_work():
+            occupancy_paused = True
+            pause_reason = pause_reason or "resource_paused"
         if occupancy_paused or ResourceController.generation_gate_closed(False, pause_reason):
             effective = 0
         elif generation_limit:
@@ -2633,6 +2797,27 @@ class ImageTaskService:
     ) -> dict[str, Any]:
         if not bool(getattr(self, "_started", False)):
             raise ImageQueueUnavailableError("image queue is not started")
+        self._ensure_worker_heartbeat()
+        worker = getattr(self, "worker", None)
+        if worker is not None:
+            fatal = str(getattr(worker, "fatal_error", "") or "").strip()
+            if fatal:
+                raise ImageQueueUnavailableError("image queue worker is unavailable")
+            if self._dispatch_runtime_unavailable() and not self.has_active_claims():
+                if not self._restore_in_progress():
+                    try:
+                        self.start()
+                    except Exception as exc:
+                        logger.warning({
+                            "event": "image_queue_submit_restart_failed",
+                            "error": str(exc),
+                        })
+                worker = getattr(self, "worker", None)
+                fatal = str(getattr(worker, "fatal_error", "") or "").strip() if worker is not None else ""
+                if fatal:
+                    raise ImageQueueUnavailableError("image queue worker is unavailable")
+            if self._dispatch_cannot_accept_new_work():
+                raise ImageQueueUnavailableError("image queue worker is unavailable")
         repository = self._require_repository()
         public_model = require_public_image_model(model)
         client_id = _clean_client_task_id(client_task_id)

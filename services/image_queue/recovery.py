@@ -10,6 +10,32 @@ from typing import Any
 from services.image_queue.repository import ImageQueueRepository
 from services.image_queue.types import JobStage, LegacyImportSummary, RecoverySummary, TaskStatus
 
+QUEUE_RESTORE_RECLAIM_MARKER = "image-queue-restore-reclaim.flag"
+
+
+def _queue_restore_reclaim_marker_path() -> Path:
+    from services.config import DATA_DIR
+
+    return Path(DATA_DIR) / QUEUE_RESTORE_RECLAIM_MARKER
+
+
+def mark_queue_restore_needs_reclaim() -> None:
+    path = _queue_restore_reclaim_marker_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("1\n", encoding="utf-8")
+
+
+def queue_restore_needs_reclaim() -> bool:
+    return _queue_restore_reclaim_marker_path().is_file()
+
+
+def clear_queue_restore_reclaim_marker() -> None:
+    path = _queue_restore_reclaim_marker_path()
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+
 
 class ImageRecovery:
     def __init__(self, repository: ImageQueueRepository) -> None:

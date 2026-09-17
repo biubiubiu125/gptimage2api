@@ -17,6 +17,7 @@ from services.image_queue.settings import (
     FALLBACK_AVAILABLE_MEMORY_BYTES,
     ImageQueueConfigurationError,
     ImageQueueSettings,
+    _cgroup_cpu_limit_cores,
 )
 from services.image_queue.types import ResourceDecision, ResourceSnapshot
 from utils.log import logger
@@ -231,30 +232,7 @@ class ResourceController:
         return min(physical_available, max(0, cgroup_limit - cgroup_current)), cgroup_limit
 
     def cpu_limit_cores(self) -> float | None:
-        try:
-            raw = (self.cgroup_root / "cpu.max").read_text(encoding="ascii").strip().split()
-            if len(raw) != 2 or raw[0] == "max":
-                return None
-            quota = int(raw[0])
-            period = int(raw[1])
-            return float(quota) / float(period) if quota > 0 and period > 0 else None
-        except (OSError, UnicodeError, ValueError, ZeroDivisionError):
-            pass
-        quota = self._read_first_cgroup_number(
-            "cpu.cfs_quota_us",
-            "cpu/cpu.cfs_quota_us",
-            "cpuacct/cpu.cfs_quota_us",
-            "cpu,cpuacct/cpu.cfs_quota_us",
-        )
-        period = self._read_first_cgroup_number(
-            "cpu.cfs_period_us",
-            "cpu/cpu.cfs_period_us",
-            "cpuacct/cpu.cfs_period_us",
-            "cpu,cpuacct/cpu.cfs_period_us",
-        )
-        if quota is None or period is None or quota <= 0 or period <= 0:
-            return None
-        return float(quota) / float(period)
+        return _cgroup_cpu_limit_cores(self.cgroup_root)
 
     def _cpu_usage_microseconds(self) -> int | None:
         try:
@@ -766,7 +744,10 @@ class ResourceController:
             if not self._occupancy_paused and (now - self._occupancy_high_since) >= hold:
                 self._occupancy_paused = True
                 self._occupancy_pause_reason = self._occupancy_reason_from_values(cpu, memory, swap)
-                if source:
+                if source and source != "registration":
+                    self._occupancy_latch_source = source
+            elif self._occupancy_paused and source in ("generation", "submission"):
+                if self._occupancy_latch_source in ("", "registration"):
                     self._occupancy_latch_source = source
         elif self._occupancy_paused:
             self._occupancy_high_since = None

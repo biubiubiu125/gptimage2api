@@ -634,6 +634,8 @@ class BackupService:
                     "Image Queue Store",
                 )
                 restored["image_queue"] = True
+                from services.image_queue.recovery import mark_queue_restore_needs_reclaim
+                mark_queue_restore_needs_reclaim()
             if database_backend == "sqlite":
                 self._restore_sqlite_database(database_source, self._repository.database_url)
             elif database_backend == "postgresql":
@@ -835,6 +837,7 @@ class BackupService:
         url = make_url(database_url)
         command = [
             "pg_restore",
+            "--single-transaction",
             "--exit-on-error",
             "--clean",
             "--if-exists",

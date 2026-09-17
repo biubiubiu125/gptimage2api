@@ -1752,22 +1752,19 @@ class ImageQueueRepository:
                     current_worker_id = str(worker_id or "").strip()
                     if current_worker_id:
                         fresh_cutoff = claim_time - timedelta(
-                            seconds=max(30.0, float(self.lease_seconds))
+                            seconds=max(60.0, float(self.lease_seconds) * 2.0)
                         )
                         active_worker_ids = {
                             str(owner or "").strip()
-                            for owner, resource_snapshot in session.execute(
+                            for owner, heartbeat_at in session.execute(
                                 select(
                                     ImageWorkerState.worker_id,
-                                    ImageWorkerState.resource_snapshot,
+                                    ImageWorkerState.heartbeat_at,
                                 ).where(
                                     ImageWorkerState.heartbeat_at > fresh_cutoff,
                                 )
                             ).all()
-                            if (
-                                str(owner or "").strip()
-                                and dict(resource_snapshot or {}).get("worker_active", True) is not False
-                            )
+                            if str(owner or "").strip()
                         }
                         local_artifacts = []
                         for artifact in local_artifact_descriptors:
@@ -3112,24 +3109,19 @@ class ImageQueueRepository:
             active_owner_ids: set[str] = set()
             if owner_ids and not ignore_live_owners:
                 worker_fresh_cutoff = reclaim_time - timedelta(
-                    seconds=max(30.0, float(self.lease_seconds))
+                    seconds=max(60.0, float(self.lease_seconds) * 2.0)
                 )
                 rows = session.execute(
                     select(
                         ImageWorkerState.worker_id,
                         ImageWorkerState.heartbeat_at,
-                        ImageWorkerState.resource_snapshot,
                     ).where(
                         ImageWorkerState.worker_id.in_(sorted(owner_ids))
                     )
                 ).all()
-                for worker_id, heartbeat_at, resource_snapshot in rows:
+                for worker_id, heartbeat_at in rows:
                     heartbeat_at = _as_utc(heartbeat_at)
-                    if (
-                        heartbeat_at is not None
-                        and heartbeat_at > worker_fresh_cutoff
-                        and dict(resource_snapshot or {}).get("worker_active", True) is not False
-                    ):
+                    if heartbeat_at is not None and heartbeat_at > worker_fresh_cutoff:
                         active_owner_ids.add(str(worker_id or "").strip())
 
             claim_runtime_cutoff = reclaim_time - timedelta(
@@ -3572,11 +3564,6 @@ class ImageQueueRepository:
                 .where(ImageWorkerState.heartbeat_at >= now - timedelta(seconds=max(60.0, self.lease_seconds * 2.0)))
                 .order_by(ImageWorkerState.heartbeat_at.desc())
             ).scalars().all()
-            workers = [
-                worker
-                for worker in workers
-                if dict(worker.resource_snapshot or {}).get("worker_active", True) is not False
-            ]
             flattened = {status.value: int(task_counts.get(status.value, 0)) for status in TaskStatus}
             flattened.update({
                 "tasks": {str(key): int(value) for key, value in task_counts.items()},
@@ -3645,14 +3632,37 @@ class ImageQueueRepository:
                 )
                 .order_by(ImageWorkerState.heartbeat_at.desc())
             ).all()
-            return next(
-                (
-                    str(pause_reason or "")
-                    for pause_reason, resource_snapshot in worker_states
-                    if dict(resource_snapshot or {}).get("worker_active", True) is not False
-                ),
-                "",
-            )
+            fallback = ""
+            for pause_reason, resource_snapshot in worker_states:
+                reason = str(pause_reason or "")
+                if dict(resource_snapshot or {}).get("worker_active", True) is not False:
+                    return reason
+                if not fallback:
+                    fallback = reason
+            return fallback
+
+    def _has_unexpired_live_job_leases(
+        self,
+        session: Session,
+        now: datetime,
+        *,
+        worker_id: str | None = None,
+    ) -> bool:
+        live_after = now - timedelta(
+            seconds=max(float(self.claim_max_runtime_seconds), float(self.lease_seconds))
+        )
+        conditions = [
+            ImageJob.status.in_([JobStatus.LEASED.value, JobStatus.RUNNING.value]),
+            or_(
+                ImageJob.lease_expires_at > now,
+                ImageJob.heartbeat_at > live_after,
+            ),
+        ]
+        if worker_id:
+            conditions.append(ImageJob.lease_owner == worker_id)
+        return session.execute(
+            select(ImageJob.id).where(*conditions).limit(1)
+        ).first() is not None
 
     def has_live_worker_states(self, now: datetime | None = None) -> bool:
         current = now if now is not None else utc_now()
@@ -3664,9 +3674,11 @@ class ImageQueueRepository:
                         ImageWorkerState.heartbeat_at >= cutoff
                     )
                 ).all()
+                if rows:
+                    return True
+                return self._has_unexpired_live_job_leases(session, current)
         except Exception:
             return True
-        return bool(rows)
 
     def purge_terminal_tasks(
         self,
@@ -3736,22 +3748,18 @@ class ImageQueueRepository:
             artifact_rows = list(session.execute(artifact_statement).scalars().all())
             if cleanup_worker_id:
                 fresh_cutoff = current_time - timedelta(
-                    seconds=max(30.0, float(self.lease_seconds))
+                    seconds=max(60.0, float(self.lease_seconds) * 2.0)
                 )
                 fresh_worker_ids = {
                     str(owner or "").strip()
-                    for owner, heartbeat_at, resource_snapshot in session.execute(
+                    for owner, heartbeat_at in session.execute(
                         select(
                             ImageWorkerState.worker_id,
                             ImageWorkerState.heartbeat_at,
-                            ImageWorkerState.resource_snapshot,
                         )
                         .where(ImageWorkerState.heartbeat_at > fresh_cutoff)
                     ).all()
-                    if (
-                        str(owner or "").strip()
-                        and dict(resource_snapshot or {}).get("worker_active", True) is not False
-                    )
+                    if str(owner or "").strip()
                 }
                 selected_rows = []
                 for item in artifact_rows:
@@ -3809,21 +3817,18 @@ class ImageQueueRepository:
             ).scalars().all())
             if cleanup_worker_id:
                 fresh_cutoff = utc_now() - timedelta(
-                    seconds=max(30.0, float(self.lease_seconds))
+                    seconds=max(60.0, float(self.lease_seconds) * 2.0)
                 )
                 fresh_worker_ids = {
                     str(owner or "").strip()
-                    for owner, resource_snapshot in session.execute(
+                    for owner, heartbeat_at in session.execute(
                         select(
                             ImageWorkerState.worker_id,
-                            ImageWorkerState.resource_snapshot,
+                            ImageWorkerState.heartbeat_at,
                         )
                         .where(ImageWorkerState.heartbeat_at > fresh_cutoff)
                     ).all()
-                    if (
-                        str(owner or "").strip()
-                        and dict(resource_snapshot or {}).get("worker_active", True) is not False
-                    )
+                    if str(owner or "").strip()
                 }
                 artifact_rows = [
                     item for item in artifact_rows
@@ -4762,6 +4767,7 @@ class ImageQueueRepository:
                     "current_generation_concurrency": 0,
                     "effective_concurrency": 0,
                     "remaining_capacity": 0,
+                    "process_instance_id": "",
                 })
                 state.resource_snapshot = snapshot
                 state.heartbeat_at = cutoff
@@ -4831,12 +4837,12 @@ class ImageQueueRepository:
                     if state.heartbeat_at.tzinfo is not None
                     else now - state.heartbeat_at.replace(tzinfo=timezone.utc)
                 ).total_seconds()
-                previous_worker_active = previous_snapshot.get("worker_active", True) is not False
-                active_heartbeat = (
-                    previous_worker_active
-                    and heartbeat_age <= max(60.0, self.lease_seconds * 2.0)
-                )
-                if active_heartbeat:
+                active_heartbeat = heartbeat_age <= max(60.0, self.lease_seconds * 2.0)
+                if active_heartbeat or self._has_unexpired_live_job_leases(
+                    session,
+                    now,
+                    worker_id=worker_id,
+                ):
                     if (
                         current_instance_id
                         and previous_instance_id

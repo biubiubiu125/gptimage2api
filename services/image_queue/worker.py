@@ -394,6 +394,7 @@ class ImageWorkerManager:
         self._wake = Event()
         self._lock = RLock()
         self._futures: dict[Future[None], ClaimedJob] = {}
+        self._stranded_claims: dict[object, ClaimedJob] = {}
         self._claim_stages: dict[object, str] = {}
         self._claim_started_at: dict[object, float] = {}
         self._claim_in_flight = False
@@ -677,13 +678,35 @@ class ImageWorkerManager:
             return False
         return True
 
+    def _has_live_claims_unlocked(self) -> bool:
+        if bool(getattr(self, "_claim_in_flight", False)):
+            return True
+        if getattr(self, "_stranded_claims", None):
+            return True
+        futures = getattr(self, "_futures", None) or {}
+        return any(not future.done() for future in futures)
+
+    def _retain_stranded_claim(self, claim: ClaimedJob) -> None:
+        job_id = getattr(getattr(claim, "job", None), "id", None)
+        if job_id is None:
+            return
+        with self._lock:
+            claims = getattr(self, "_stranded_claims", None)
+            if claims is None:
+                self._stranded_claims = {}
+                claims = self._stranded_claims
+            claims[job_id] = claim
+
     def _set_fatal_error(self, exc: Exception) -> None:
         message = str(exc or "fatal image worker error")[:300]
         with self._lock:
             self._fatal_error = message
             self._recent_error = message
-        self._stop.set()
+            self._worker_active = False
+            has_live = self._has_live_claims_unlocked()
         self._wake.set()
+        if not has_live:
+            self._stop.set()
 
     @property
     def fatal_error(self) -> str:
@@ -760,11 +783,19 @@ class ImageWorkerManager:
     def start(self) -> None:
         if self._dispatcher and self._dispatcher.is_alive():
             return
+        heartbeat = self._heartbeat
+        if heartbeat is not None and heartbeat.is_alive():
+            self._stop.set()
+            heartbeat.join(timeout=max(1.0, float(self.settings.heartbeat_seconds)))
+            if heartbeat.is_alive():
+                raise RuntimeError("image worker cannot restart while heartbeat is still running")
         with self._lock:
             active = [future for future in self._futures if not future.done()]
-            if active:
+            stranded = getattr(self, "_stranded_claims", None) or {}
+            if active or stranded:
                 raise RuntimeError("image worker cannot restart while claims are still active")
             self._futures.clear()
+            self._stranded_claims.clear()
             self._claim_stages.clear()
             self._claim_started_at.clear()
             self._overdue_claims_logged.clear()
@@ -792,6 +823,8 @@ class ImageWorkerManager:
 
     def _resume_dispatcher(self) -> None:
         with self._lock:
+            if str(getattr(self, "_fatal_error", "") or "").strip():
+                return
             self._worker_active = True
         if self._dispatcher is None or not self._dispatcher.is_alive():
             self._dispatcher = Thread(target=self._dispatch_loop, name="image-dispatcher", daemon=True)
@@ -834,7 +867,8 @@ class ImageWorkerManager:
             pending = {future for future in self._futures if not future.done()}
             dispatcher_alive = bool(self._dispatcher is not None and self._dispatcher.is_alive())
             claim_in_flight = bool(getattr(self, "_claim_in_flight", False))
-        drained = not pending and not dispatcher_alive and not claim_in_flight
+            stranded = bool(getattr(self, "_stranded_claims", None))
+        drained = not pending and not dispatcher_alive and not claim_in_flight and not stranded
         if not drained:
             # Keep PostgreSQL account leases and in-process claims until the
             # executor thread finishes. Releasing now would free the slot while
@@ -855,6 +889,13 @@ class ImageWorkerManager:
         if self._heartbeat and self._heartbeat.is_alive():
             remaining = max(0.0, deadline - time.monotonic()) if timeout is not None else None
             self._heartbeat.join(remaining)
+        if self._heartbeat is not None and self._heartbeat.is_alive():
+            logger.warning({
+                "event": "image_worker_shutdown_timeout_keeps_heartbeat",
+                "worker_id": self.worker_id,
+                "resume_if_undrained": bool(resume_if_undrained),
+            })
+            return False
         for executor in (
             self._generation_executor,
             self._recovery_executor,
@@ -900,8 +941,9 @@ class ImageWorkerManager:
     ) -> int:
         with self._lock:
             futures = getattr(self, "_futures", None) or {}
+            stranded = getattr(self, "_stranded_claims", None) or {}
             return occupied_in_process_account_slots(
-                list(futures.values()),
+                list(futures.values()) + list(stranded.values()),
                 claim_stages=getattr(self, "_claim_stages", None),
                 candidate_ids=candidate_ids,
             )
@@ -965,6 +1007,16 @@ class ImageWorkerManager:
         overdue: list[ClaimedJob] = []
         with self._lock:
             active = list(self._futures.values())
+            seen = {
+                getattr(getattr(claim, "job", None), "id", None)
+                for claim in active
+            }
+            for claim in (getattr(self, "_stranded_claims", None) or {}).values():
+                job_id = getattr(getattr(claim, "job", None), "id", None)
+                if job_id in seen:
+                    continue
+                active.append(claim)
+                seen.add(job_id)
             for claim in active:
                 started_at = self._claim_started_at.get(claim.job.id, now)
                 if now - started_at >= max_runtime:
@@ -973,10 +1025,43 @@ class ImageWorkerManager:
             self._log_overdue_claim(claim, max_runtime=max_runtime)
         return active
 
+    def _ensure_heartbeat_thread(self) -> None:
+        if self._stop.is_set():
+            return
+        heartbeat = self._heartbeat
+        if heartbeat is not None and heartbeat.is_alive():
+            return
+        dispatcher = self._dispatcher
+        dispatcher_alive = dispatcher is not None and dispatcher.is_alive()
+        started = False
+        with self._lock:
+            has_live = self._has_live_claims_unlocked()
+            worker_active = bool(self._worker_active)
+            if not dispatcher_alive and not worker_active and not has_live:
+                return
+            if self._stop.is_set():
+                return
+            heartbeat = self._heartbeat
+            if heartbeat is not None and heartbeat.is_alive():
+                return
+            thread = Thread(target=self._heartbeat_loop, name="image-heartbeat", daemon=True)
+            self._heartbeat = thread
+            thread.start()
+            started = True
+        if started:
+            logger.warning({
+                "event": "image_worker_heartbeat_restarted",
+                "worker_id": getattr(self, "worker_id", ""),
+                "dispatcher_alive": dispatcher_alive,
+                "worker_active": worker_active,
+                "has_live_claims": has_live,
+            })
+
     def _heartbeat_loop(self) -> None:
         while not self._stop.is_set():
             self._reap_completed_futures()
-            self._heartbeat_worker_state()
+            if not str(self.fatal_error or "").strip():
+                self._heartbeat_worker_state()
             claims = self._active_claims()
             if claims:
                 try:
@@ -1040,6 +1125,7 @@ class ImageWorkerManager:
         while not self._stop.is_set():
             if not self._worker_active:
                 return
+            self._ensure_heartbeat_thread()
             try:
                 self._dispatch_once()
                 backoff_seconds = max(1.0, float(self.settings.poll_interval_seconds))
@@ -1099,8 +1185,26 @@ class ImageWorkerManager:
                         "job_id": str(claim.job.id) if claim is not None else "",
                         "error": str(error),
                     })
+            dispatcher = getattr(self, "_dispatcher", None)
+            dispatcher_alive = bool(
+                dispatcher is not None
+                and callable(getattr(dispatcher, "is_alive", None))
+                and dispatcher.is_alive()
+            )
+            if (
+                (
+                    str(getattr(self, "_fatal_error", "") or "").strip()
+                    or not bool(self._worker_active)
+                )
+                and not dispatcher_alive
+                and not getattr(self, "_claim_in_flight", False)
+                and not self._futures
+                and not getattr(self, "_stranded_claims", None)
+            ):
+                self._stop.set()
 
     def _dispatch_once(self) -> None:
+        self._ensure_heartbeat_thread()
         self._reap_completed_futures()
         if not self._worker_active:
             return
@@ -1271,7 +1375,6 @@ class ImageWorkerManager:
             occupancy_allows=(
                 plan.allow_generation
                 and live_generation_open
-                and live_generation_allowed(self.resource_controller, snapshot)
             ),
             remaining_account_slots=remaining_account_slots,
         )
@@ -1298,6 +1401,14 @@ class ImageWorkerManager:
                 )
             except Exception as exc:
                 self._recent_error = str(exc)[:300]
+                if self._is_worker_identity_conflict(exc):
+                    self._set_fatal_error(exc)
+                    logger.error({
+                        "event": "image_worker_identity_conflict",
+                        "worker_id": self.worker_id,
+                        "error": str(exc),
+                    })
+                    return
                 # claim_next_job already swallows IntegrityError races; any remaining
                 # failure must not tear down the dispatcher with long backoff only.
                 logger.error({
@@ -1321,6 +1432,20 @@ class ImageWorkerManager:
                         "job_id": str(claim.job.id),
                         "error": str(exc),
                     })
+                    try:
+                        self._handle_claim_exception(
+                            claim,
+                            getattr(claim, "job", None),
+                            exc,
+                            claim.job.stage,
+                        )
+                    except Exception as fail_exc:
+                        logger.error({
+                            "event": "image_worker_occupancy_release_fail_job",
+                            "job_id": str(claim.job.id),
+                            "error": str(fail_exc),
+                        })
+                        self._retain_stranded_claim(claim)
                 self._wake.wait(self.settings.poll_interval_seconds)
                 self._wake.clear()
                 return
@@ -1336,6 +1461,20 @@ class ImageWorkerManager:
                             "job_id": str(claim.job.id),
                             "error": str(exc),
                         })
+                        try:
+                            self._handle_claim_exception(
+                                claim,
+                                getattr(claim, "job", None),
+                                exc,
+                                claim.job.stage,
+                            )
+                        except Exception as fail_exc:
+                            logger.error({
+                                "event": "image_worker_recovery_release_fail_job",
+                                "job_id": str(claim.job.id),
+                                "error": str(fail_exc),
+                            })
+                            self._retain_stranded_claim(claim)
                     self._wake.wait(self.settings.poll_interval_seconds)
                     self._wake.clear()
                     return

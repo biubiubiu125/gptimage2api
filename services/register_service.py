@@ -661,6 +661,10 @@ class RegisterService:
         if not self._integrations_ready():
             self._bump(pause_reason="mail_provider_unavailable")
             return False
+        from services.backup_service import backup_service as live_backup
+        if callable(getattr(live_backup, "is_restore_active", None)) and live_backup.is_restore_active():
+            self._bump(pause_reason="backup_restore")
+            return False
         controller = self._resource_controller()
         if controller is None:
             self._bump(pause_reason="resource_pressure")
@@ -1129,7 +1133,7 @@ class RegisterService:
         self._append_log("registration stop requested; waiting for running tasks to finish", "yellow")
         return self.get()
 
-    def shutdown(self, timeout: float | None = None) -> dict:
+    def shutdown(self, timeout: float | None = None) -> dict | bool:
         self._shutdown_event.set()
         cancelled = self._cancel_pending_registration_futures()
         if cancelled:
@@ -1145,11 +1149,7 @@ class RegisterService:
                 "registration shutdown timed out; background registration work is still draining",
                 "red",
             )
-            try:
-                return self.get()
-            except Exception as exc:
-                self._append_log(f"registration shutdown snapshot unavailable: {exc}", "error")
-                return self._snapshot(redact=True, reload=False)
+            return False
         with self._lock:
             executor_shutdown = self._registration_executor_shutdown
         if not executor_shutdown:

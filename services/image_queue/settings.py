@@ -104,13 +104,19 @@ def _read_first_cgroup_number(*relative_paths: str, cgroup_root: Path = Path("/s
 def _cgroup_cpu_limit_cores(cgroup_root: Path = Path("/sys/fs/cgroup")) -> float | None:
     try:
         raw = (cgroup_root / "cpu.max").read_text(encoding="ascii").strip().split()
-        if len(raw) == 2 and raw[0] != "max":
-            quota = int(raw[0])
-            period = int(raw[1])
-            if quota > 0 and period > 0:
-                return float(quota) / float(period)
-    except (OSError, UnicodeError, ValueError, ZeroDivisionError):
-        pass
+    except (OSError, UnicodeError):
+        raw = None
+    else:
+        # v2 cpu.max 文件存在时以它为准。"max" 表示不限额，不再读残留 v1 quota。
+        try:
+            if len(raw) == 2 and raw[0] != "max":
+                quota = int(raw[0])
+                period = int(raw[1])
+                if quota > 0 and period > 0:
+                    return float(quota) / float(period)
+        except (ValueError, ZeroDivisionError):
+            return None
+        return None
     quota = _read_first_cgroup_number(
         "cpu.cfs_quota_us",
         "cpu/cpu.cfs_quota_us",
@@ -259,12 +265,6 @@ class ImageQueueSettings:
     recovery_account_timeout_seconds: int = 900
     delivery_grace_seconds: int = 7 * 24 * 60 * 60
     terminal_retention_seconds: int = 30 * 24 * 60 * 60
-    cpu_throttle_percent: float = 90.0
-    cpu_pause_percent: float = 95.0
-    cpu_resume_percent: float = 85.0
-    memory_throttle_percent: float = 85.0
-    memory_pause_percent: float = 90.0
-    memory_reject_percent: float = 95.0
     occupancy_pause_percent: float = 90.0
     occupancy_resume_percent: float = 80.0
     occupancy_hold_seconds: float = 2.5
@@ -417,12 +417,6 @@ class ImageQueueSettings:
                 24 * 60 * 60,
                 365 * 24 * 60 * 60,
             ),
-            cpu_throttle_percent=_env_float("IMAGE_QUEUE_CPU_THROTTLE_PERCENT", 90.0, 1.0),
-            cpu_pause_percent=_env_float("IMAGE_QUEUE_CPU_PAUSE_PERCENT", 95.0, 1.0),
-            cpu_resume_percent=_env_float("IMAGE_QUEUE_CPU_RESUME_PERCENT", 85.0, 1.0),
-            memory_throttle_percent=_env_float("IMAGE_QUEUE_MEMORY_THROTTLE_PERCENT", 85.0, 1.0),
-            memory_pause_percent=_env_float("IMAGE_QUEUE_MEMORY_PAUSE_PERCENT", 90.0, 1.0),
-            memory_reject_percent=_env_float("IMAGE_QUEUE_MEMORY_REJECT_PERCENT", 95.0, 1.0),
             occupancy_pause_percent=_env_float("IMAGE_QUEUE_OCCUPANCY_PAUSE_PERCENT", 90.0, 1.0),
             occupancy_resume_percent=_env_float("IMAGE_QUEUE_OCCUPANCY_RESUME_PERCENT", 80.0, 1.0),
             occupancy_hold_seconds=_env_float("IMAGE_QUEUE_OCCUPANCY_HOLD_SECONDS", 2.5, 0.1),

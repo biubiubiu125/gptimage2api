@@ -706,10 +706,10 @@ def _build_diagnostic_groups(
     occupancy_paused = bool(capacity.get("occupancy_paused"))
     pause_reason = str(capacity.get("pause_reason") or "")
     occupancy_meta = pause_reason or "CPU / 内存 / Swap 占用 90% 关门，低于 80% 开门"
+    if pause_reason == "resource_paused":
+        occupancy_meta = "调度未就绪"
     occupancy_source = str(capacity.get("occupancy_latch_source") or "")
-    if occupancy_source == "registration":
-        occupancy_meta = f"{occupancy_meta}（注册探测关门）"
-    elif occupancy_source == "submission":
+    if occupancy_source == "submission":
         occupancy_meta = f"{occupancy_meta}（入队探测关门）"
     gate_closed = ResourceController.generation_gate_closed(occupancy_paused, pause_reason)
     occupancy_value = "已关门" if gate_closed else ("开着" if capacity else "-")

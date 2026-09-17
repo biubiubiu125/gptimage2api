@@ -4,7 +4,7 @@ services:
     container_name: gptimage2api
     restart: unless-stopped
     stop_grace_period: 300s
-    # 同宿主机多副本不要无 CPU 限额叠加；每份都会按整机核数计算自动生图上限。不要在 Compose 里写死 CPU 限额。
+    # 同宿主机多副本不要无 CPU 限额叠加；核数优先读容器 cgroup CPU 限额，没有限额再用整机核数。不要在 Compose 里写死 CPU 限额。
     ulimits:
       nofile:
         soft: 262144
