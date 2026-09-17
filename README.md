@@ -90,7 +90,7 @@ docker compose -f docker-compose.remote.yml up -d
 |   🔌   | API 网关   | Chat Completions、Responses、Messages、搜索、图片生成、图片编辑、PPT / PSD 与统一可编辑文件任务                |
 |   💬   | 对话画图   | 文本对话、联网搜索、文生图、图生图、多图参考、局部编辑、Markdown、代码高亮、引用来源和推理强度                 |
 |   👥   | 账号管理   | 手动添加、OAuth、Access Token、Session JSON、CPA、远程 CPA、Sub2API 导入，以及搜索、筛选、分组、导出和批量处理 |
-|   📨   | 注册机     | 仅支持 `yyds_mail`、`remail`、`outlook_token`、`icloud_api`，成功注册自动进入上游账号池 |
+|   📨   | 注册机     | 必须配置住宅代理 URL（不能用默认出口或代理组）；仅支持 `yyds_mail`、`remail`、`outlook_token`、`icloud_api`，成功注册自动进入上游账号池 |
 |   🔑   | 凭证与额度 | 独立展示 AT / RT 状态，支持 RT 刷新 AT、同步套餐与额度、指定账号文本/画图测试和异常账号处置                    |
 |   ⚙️   | 调度与并发 | 多账号选择、账号处理并发、单账号图片并发、多图并行、失败换号、额度与限流状态管理                               |
 |   🌐   | 代理出口   | 账号代理、账号组代理、多出口代理组、节点图片并发、轮换间隔、默认出口、备用出口和连通性检测                     |
@@ -98,7 +98,7 @@ docker compose -f docker-compose.remote.yml up -d
 |   🖼️   | 图片与文件 | 本地 / WebDAV 存储、图库、标签、缩略图、下载、ZIP、压缩、清理、PPT / PSD 产物和可选图片放大                    |
 |   ✨   | 提示词库   | 本地提示词资产、云端来源同步、分类选择和更新状态管理                                                           |
 |   💾   | 数据与备份 | SQLite、PostgreSQL 18、R2 备份、保留策略，以及调用趋势、成功率和模型统计                                       |
-|   🖥️   | 管理控制台 | 概览、账号、代理、日志、实时监控、图片、对话画图和系统设置，适配桌面与移动端                                   |
+|   🖥️   | 管理控制台 | 概览、账号、注册账号、代理、日志、实时监控、图片、对话画图和系统设置，适配桌面与移动端                                   |
 
 ## 架构
 
@@ -136,15 +136,14 @@ Authorization: Bearer <auth-key>
 | `/v1/responses`                     | `POST`       | 支持文本、搜索和图片工具调用的 Responses 入口        |
 | `/v1/messages`                      | `POST`       | Anthropic Messages 兼容入口                          |
 | `/v1/search`                        | `POST`       | 返回回答、引用来源和搜索结果                         |
-| `/v1/images/generations`            | `POST`       | 图片生成，支持 `n=1..4`                              |
+| `/v1/images/generations`            | `POST`       | 图片生成，支持 `gpt-image-2` 及 `gpt-image-2.5*` 别名，`n=1..4` |
 | `/v1/images/edits`                  | `POST`       | multipart、远程 URL、base64、data URL 和多参考图编辑 |
 | `/v1/editable-file-tasks`           | `GET / POST` | 创建与查询 PPT / PSD 可编辑文件任务                  |
-| `/v1/editable-file-tasks/{task_id}` | `DELETE`     | 删除当前密钥所属任务                                 |
 | `/v1/ppt/generations`               | `POST`       | PPT 任务快捷入口                                     |
 | `/v1/psd/generations`               | `POST`       | PSD 任务快捷入口                                     |
 | `/files/{file_path}`                | `GET`        | 下载当前 API Key 所属任务的生成文件                 |
 
-文件任务的创建、查询和删除按 API Key 隔离；下载 `/files/...` 需要携带当前 API Key。服务端会校验任务归属、存储路径及文件类型，拒绝路径穿越。
+文件任务的创建与查询按 API Key 隔离；PPT / PSD 必须携带 `Idempotency-Key`、`X-NewAPI-Request-Id`、`X-OneAPI-Request-Id` 或 `client_task_id`。下载 `/files/...` 需要携带当前 API Key。服务端会校验任务归属、存储路径及文件类型，拒绝路径穿越。
 
 <details>
 <summary>Chat Completions 示例</summary>
@@ -169,12 +168,11 @@ curl http://localhost:2080/v1/images/generations \
   -d '{"model":"gpt-image-2","prompt":"一只漂浮在太空里的猫，电影感光影","n":1,"response_format":"b64_json"}'
 ```
 
-`Idempotency-Key`（幂等键）必须在每次新任务中使用唯一值；网络重试时复用原值，
-会返回同一个持久化 Image Task，不会重复提交生图。
+图片请求优先携带独立的 `Idempotency-Key`、`X-NewAPI-Request-Id`、`X-OneAPI-Request-Id` 或 `client_task_id`。没有这些字段时，服务端会生成 `request:<uuid>` 并通过 `Idempotency-Key` 响应头返回。网络重试时复用原值，会回到同一个持久化 Image Task，不会重复提交生图。
 
 </details>
 
-实际可用模型以上游账号和 `/v1/models` 返回值为准。
+实际可用模型以上游账号和 `/v1/models` 返回值为准。公开图片模型为 `gpt-image-2`，同时接受 `gpt-image-2.5`、`gpt-image-2.5-flare` 和 `gpt-image-2.5-sunburst`。
 
 ## 关键配置
 
@@ -193,11 +191,11 @@ curl http://localhost:2080/v1/images/generations \
 | `GPTIMAGE2API_IMAGE_QUEUE_MAX_BACKLOG` | `50` | 队列最大待处理任务数                                                                  |
 | `account_processing_concurrency` | `30`         | 账号导入、刷新、同步和批量处理容量                                                       |
 | `image_account_concurrency`      | `1`          | 单账号图片并发上限，可设置为 1–3                                                         |
-| `image_stream_timeout_secs`      | `80`         | 图片上游 SSE / HTTP 流最长等待时间                                                       |
+| `image_stream_timeout_secs`      | `80`         | 图片上游 SSE / HTTP 流最长等待时间，范围 1-1800 秒                                                       |
 | `image_poll_timeout_secs`        | `60`         | 图片结果解析与轮询最长等待时间                                                           |
 | `log_retention_hours`            | `24`         | 调用日志自动保留小时数                                                                   |
 
-其余设置通过控制台维护。配置项的权威默认值与约束以当前接口投影为准。自动队列连接池每副本最多 80+40，两副本加应用池仍低于捆绑 PostgreSQL `max_connections=500`。本机生图名额按领取时阶段计算，下载过程仍占着生图槽。HTTP 入队不再跟 85% 连接池硬墙；备份恢复只有成功才会把图片队列、注册、GenBox 和备份调度拉起来，失败保持停机，队列没起来就不拉后面的服务，队列未启动、调度被打死或调度线程已停时拒绝入队。残留心跳未排空时健康检查按不可用、占用门关门；还有在手任务、心跳却已停时，健康检查、监控和入队会把心跳拉起来续租，但仍拒绝新入队。残留心跳在手任务画完后自己停心跳；心跳停掉且没有在手任务后，下一次入队会把队列拉起来。心跳线程已停但调度线程仍活时，调度循环会把心跳拉起来继续续租；健康检查仍按不可用，占用门保持现场，HTTP 入队不因此拒绝。占用门只认 `OCCUPANCY_*`，监控不再显示注册探测关门。含队列的备份先恢复队列 dump，并落下本地回收标记，后续普通启动也会按「刚恢复过」收幽灵租约；同进程第二次恢复仍会再停队列。身份冲突时还在画的任务继续心跳续租；占用放回失败会失败任务，两次都失败则继续续租。调度被打死或队列库已关掉且没有在手任务时，`start()` 会重新进恢复。应用库 `pg_restore --single-transaction` 前关掉账号连接池，恢复期间健康检查不查库。恢复后会收掉快照里未过期的在画租约，并把旧工作进程 `process_instance_id` 清空。未排空停机心跳仍新时其它副本不会抢走租约；活工人先看心跳，心跳过期后仍看未过期作业租约，租约过期但仍在最长领取时间内心跳的在画任务也算活着。恢复中止不会把身份冲突的调度拉起来。领取阶段身份冲突同样置 fatal。备份恢复先停注册；注册关机超时会中止恢复，不再继续清库。占用门闩来源不写注册探测，生图或入队探测会改成对应来源。不健康队列重置时 `stop()` 抛错不当成已排空；残留心跳 join 超时拒绝再开新心跳，排空成功也要心跳真正停掉才标停机，重置按心跳间隔等待。领取前占用复查采现场，不再喂入队时的 T0 快照。监控占用门会推进 2.5 秒计时，积压满或积压查询失败时关门；账号空位探测失败保留上次快照，「当前在画」读本机实际领取。
+其余设置通过控制台维护。配置项的权威默认值与约束以当前接口投影为准。自动队列连接池每副本最多 80+40，两副本加应用池仍低于捆绑 PostgreSQL `max_connections=500`。本机生图名额按领取时阶段计算，下载过程仍占着生图槽。占用门只认 `OCCUPANCY_*`：CPU / 内存 / Swap 达到暂停阈值并持续保持后关门，三项都降到恢复阈值以下并持续保持后才开门；注册探测不再写入占用门。备份恢复进行中 `/health` 返回 200，且 `image_queue.status=restoring`；其余 HTTP 返回 503。含队列的备份会先恢复队列 dump，再覆盖应用库；只有恢复成功才会重新拉起图片队列、注册、GenBox、备份调度和后台线程。
 
 ## 效果展示
 
@@ -220,7 +218,7 @@ npm install
 npm run dev
 ```
 
-默认开发地址为 `http://localhost:5173`，后端接口由 Vite 开发代理转发。
+默认开发地址为 `http://localhost:5173`，后端接口由 Vite 开发代理转发。本地源码运行前必须准备 PostgreSQL，并设置 `GPTIMAGE2API_IMAGE_QUEUE_DATABASE_URL`；Application Database 可以使用 SQLite，图片队列不能。
 
 ## 文档
 

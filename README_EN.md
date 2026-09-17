@@ -94,6 +94,7 @@ Shared UI components, themes, and interaction primitives come from [yukkcat/nano
 | 🔌 | API gateway | Chat Completions, Responses, Messages, search, image generation and editing, PPT/PSD generation, and unified editable-file tasks |
 | 💬 | Chat and image studio | Text chat, web search, text-to-image, image-to-image, multiple references, local editing, Markdown, syntax highlighting, citations, and reasoning effort |
 | 👥 | Account management | Manual, OAuth, Access Token, Session JSON, CPA, remote CPA, and Sub2API imports, plus search, filters, groups, exports, and batch actions |
+| 📨 | Registration | Requires a residential proxy URL (not the default egress or a proxy group); supports only `yyds_mail`, `remail`, `outlook_token`, and `icloud_api`, then writes verified accounts into the upstream pool |
 | 🔑 | Credentials and quotas | Separate AT/RT states, RT-based AT renewal, plan and quota synchronization, pinned-account text/image tests, and invalid-account handling |
 | ⚙️ | Scheduling and concurrency | Multi-account selection, account-processing concurrency, per-account image concurrency, parallel images, account switching, quotas, and rate-limit state |
 | 🌐 | Proxy egress | Account and account-group proxies, multi-egress proxy groups, per-node image concurrency, rotation, default and fallback egress, and connectivity checks |
@@ -101,7 +102,7 @@ Shared UI components, themes, and interaction primitives come from [yukkcat/nano
 | 🖼️ | Images and files | Local/WebDAV storage, gallery, tags, thumbnails, downloads, ZIP archives, compression, cleanup, PPT/PSD artifacts, and optional image upscaling |
 | ✨ | Prompt library | Local prompt assets, cloud-source synchronization, categorized selection, and source health |
 | 💾 | Data and backups | SQLite, PostgreSQL 18, R2 backups, retention policies, request trends, success rates, and model metrics |
-| 🖥️ | Admin console | Dashboard, accounts, proxies, logs, real-time monitoring, gallery, chat and image studio, and settings on desktop and mobile |
+| 🖥️ | Admin console | Dashboard, accounts, registration, proxies, logs, real-time monitoring, gallery, chat and image studio, and settings on desktop and mobile |
 
 ## Architecture
 
@@ -139,15 +140,14 @@ Authorization: Bearer <auth-key>
 | `/v1/responses` | `POST` | Responses entry point with text, search, and image tools |
 | `/v1/messages` | `POST` | Anthropic Messages-compatible entry point |
 | `/v1/search` | `POST` | Returns an answer, citations, and search results |
-| `/v1/images/generations` | `POST` | Image generation with `n=1..4` |
+| `/v1/images/generations` | `POST` | Image generation with `gpt-image-2` and `gpt-image-2.5*` aliases, `n=1..4` |
 | `/v1/images/edits` | `POST` | Image editing from multipart files, remote URLs, base64, data URLs, or multiple references |
 | `/v1/editable-file-tasks` | `GET / POST` | Creates and queries editable PPT/PSD tasks |
-| `/v1/editable-file-tasks/{task_id}` | `DELETE` | Deletes a task owned by the current key |
 | `/v1/ppt/generations` | `POST` | PPT task shortcut |
 | `/v1/psd/generations` | `POST` | PSD task shortcut |
 | `/files/{file_path}` | `GET` | Downloads a generated file owned by the current API key |
 
-Creating, querying, deleting, and downloading file tasks are isolated by API key. `/files/...` requests require the current API key; downloads validate task ownership, storage paths, and file types, and reject path traversal.
+Creating and querying file tasks are isolated by API key. PPT/PSD requests must send `Idempotency-Key`, `X-NewAPI-Request-Id`, `X-OneAPI-Request-Id`, or `client_task_id`. `/files/...` requests require the current API key; downloads validate task ownership, storage paths, and file types, and reject path traversal.
 
 <details>
 <summary>Chat Completions example</summary>
@@ -172,13 +172,11 @@ curl http://localhost:2080/v1/images/generations \
   -d '{"model":"gpt-image-2","prompt":"A cat floating in space, cinematic lighting","n":1,"response_format":"b64_json"}'
 ```
 
-`Idempotency-Key` must be unique for each new task. Reuse the same value when
-retrying a network request to receive the same durable Image Task instead of
-submitting a duplicate generation.
+Image requests should send a unique `Idempotency-Key`, `X-NewAPI-Request-Id`, `X-OneAPI-Request-Id`, or `client_task_id`. If none is provided, the server generates `request:<uuid>` and returns it in the `Idempotency-Key` response header. Reuse that value when retrying a network request to receive the same durable Image Task instead of submitting a duplicate generation.
 
 </details>
 
-Available models depend on the upstream accounts and the current `/v1/models` response.
+Available models depend on the upstream accounts and the current `/v1/models` response. Public image models are `gpt-image-2`, plus `gpt-image-2.5`, `gpt-image-2.5-flare`, and `gpt-image-2.5-sunburst`.
 
 ## Configuration
 
@@ -197,11 +195,11 @@ Available models depend on the upstream accounts and the current `/v1/models` re
 | `GPTIMAGE2API_IMAGE_QUEUE_MAX_BACKLOG` | `50` | Maximum queued image tasks |
 | `account_processing_concurrency` | `30` | Capacity for account imports, refreshes, synchronization, and batch processing |
 | `image_account_concurrency` | `1` | Per-account image concurrency, configurable from 1 to 3 |
-| `image_stream_timeout_secs` | `80` | Maximum wait for the upstream image SSE/HTTP stream |
+| `image_stream_timeout_secs` | `80` | Maximum wait for the upstream image SSE/HTTP stream; range 1-1800 seconds |
 | `image_poll_timeout_secs` | `60` | Maximum wait for image result polling and parsing |
 | `log_retention_hours` | `24` | Automatic call-record retention period in hours |
 
-Other settings are managed through the console. The current backend projection is authoritative for defaults and constraints. Auto queue pools cap at 80+40 per replica so two replicas plus the application pool stay under bundled PostgreSQL `max_connections=500`. In-process generation slots follow the stage at claim time, so downloads keep occupying a generation slot. HTTP enqueue no longer follows the 85% queue-pool wall; generation still does. Backup restore restarts the image queue, register, GenBox, and backup scheduler only after a successful restore, skips those later services if the queue fails to start, refuses enqueue while the queue is stopped or the dispatcher is dead, disposes the application pool before `pg_restore --clean --single-transaction`, skips database health probes during restore, writes a local reclaim marker after the queue dump so a later ordinary start still reclaims unrestored in-flight leases, and clears restored `process_instance_id` values. A successful restore clears the in-process stop latch so the next restore still quiesces the queue. Identity conflicts keep heartbeating in-flight paints; occupancy-release failures fail the job, and a double failure keeps heartbeating the stranded lease. `start()` re-enters recovery when the queue database is disposed or the dispatcher is dead and no claims remain. A leftover heartbeat that failed to drain keeps health unavailable and the occupancy gate closed. If leftover claims are still live but the heartbeat is dead, health, monitor, and enqueue restart that heartbeat to keep renewing leases while still refusing new work. After leftover claims finish, the leftover heartbeat stops itself; once it is gone and no claims remain, the next enqueue restarts the queue. If the heartbeat thread is dead but the dispatcher is still alive, the dispatch loop restarts the heartbeat to keep renewing leases; health stays unavailable while the occupancy gate keeps its live sample and HTTP enqueue is not refused for that reason. Occupancy follows `OCCUPANCY_*` only; the monitor no longer labels a registration-probe close. An undrained stop still protects leases while the owner heartbeat is fresh, even if `worker_active=False`. Live-worker checks also count unexpired `LEASED`/`RUNNING` jobs after the heartbeat window, and still-painting jobs whose heartbeat is inside the claim-max-runtime window even after the lease timestamp expires, so a new process cannot take over a pinned `worker_id` while those jobs are still live. Restore abort does not restart a dispatcher that already hit an identity conflict. Claim-time identity conflicts also mark the worker fatal. Restore maintenance stops registration first; a registration shutdown timeout aborts restore instead of looking like success. Occupancy latch source ignores registration probes and upgrades to generation or submission when those probes run. Unhealthy-queue reset does not treat a `stop()` exception as drained; leftover heartbeat join timeout refuses to start a second heartbeat, drain success waits until that heartbeat actually exits before marking the worker inactive, and reset waits a heartbeat interval. Pre-claim occupancy rechecks live samples and does not write the enqueue-time snapshot back into the latch. The occupancy monitor advances the 2.5s timer and fail-closes on a full or unreadable backlog; a live-slot probe error keeps the last snapshot, and current-in-paint uses the local claim count.
+Other settings are managed through the console. The current backend projection is authoritative for defaults and constraints. Auto queue pools cap at 80+40 per replica so two replicas plus the application pool stay under bundled PostgreSQL `max_connections=500`. In-process generation slots follow the stage at claim time, so downloads keep occupying a generation slot. Occupancy follows `OCCUPANCY_*` only: CPU / memory / swap must stay at the pause threshold before the gate closes, and all three must stay below the resume threshold before it reopens; registration probes do not write the occupancy gate. During backup restore, `/health` returns 200 with `image_queue.status=restoring`; other HTTP returns 503. Queue-inclusive restores restore the queue dump first, then overlay the application database; the image queue, register, GenBox, backup scheduler, and background threads restart only after a successful restore.
 
 ## Screenshots
 
@@ -224,7 +222,7 @@ npm install
 npm run dev
 ```
 
-The frontend development server defaults to `http://localhost:5173`, with backend requests forwarded by the Vite development proxy.
+The frontend development server defaults to `http://localhost:5173`, with backend requests forwarded by the Vite development proxy. Local source runs require PostgreSQL and `GPTIMAGE2API_IMAGE_QUEUE_DATABASE_URL`; the Application Database may use SQLite, but the image queue cannot.
 
 ## Documentation
 

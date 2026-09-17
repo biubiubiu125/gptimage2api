@@ -805,10 +805,12 @@ class ImageWorkerManager:
             self._worker_active = True
         self._stop.clear()
         self._started_at_monotonic = time.monotonic()
-        self._dispatcher = Thread(target=self._dispatch_loop, name="image-dispatcher", daemon=True)
-        self._heartbeat = Thread(target=self._heartbeat_loop, name="image-heartbeat", daemon=True)
-        self._dispatcher.start()
-        self._heartbeat.start()
+        dispatcher = Thread(target=self._dispatch_loop, name="image-dispatcher", daemon=True)
+        heartbeat = Thread(target=self._heartbeat_loop, name="image-heartbeat", daemon=True)
+        self._dispatcher = dispatcher
+        self._heartbeat = heartbeat
+        heartbeat.start()
+        dispatcher.start()
         logger.info({
             "event": "image_worker_started",
             "worker_id": self.worker_id,
@@ -1025,11 +1027,16 @@ class ImageWorkerManager:
             self._log_overdue_claim(claim, max_runtime=max_runtime)
         return active
 
+    def _heartbeat_is_unstarted(self, heartbeat: object | None) -> bool:
+        return heartbeat is not None and getattr(heartbeat, "ident", "missing") is None
+
     def _ensure_heartbeat_thread(self) -> None:
         if self._stop.is_set():
             return
         heartbeat = self._heartbeat
         if heartbeat is not None and heartbeat.is_alive():
+            return
+        if self._heartbeat_is_unstarted(heartbeat):
             return
         dispatcher = self._dispatcher
         dispatcher_alive = dispatcher is not None and dispatcher.is_alive()
@@ -1043,6 +1050,8 @@ class ImageWorkerManager:
                 return
             heartbeat = self._heartbeat
             if heartbeat is not None and heartbeat.is_alive():
+                return
+            if self._heartbeat_is_unstarted(heartbeat):
                 return
             thread = Thread(target=self._heartbeat_loop, name="image-heartbeat", daemon=True)
             self._heartbeat = thread
