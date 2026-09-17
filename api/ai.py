@@ -26,8 +26,11 @@ from services.protocol import (
     openai_search,
     durable_image,
 )
-from services.quota_service import reserve_quota
+from services.protocol.error_response import MODELS_UNAVAILABLE_PUBLIC_MESSAGE
+from services.quota_service import image_quota_units_from_request, reserve_quota
+from utils.diagnostics import diagnostic_excerpt
 from utils.helper import has_response_image_generation_tool, is_image_chat_request
+from utils.log import logger
 
 
 class ImageGenerationRequest(BaseModel):
@@ -48,7 +51,7 @@ class ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     model: str | None = None
     prompt: str | None = None
-    n: int | None = None
+    n: int | None = Field(default=None, ge=1, le=4)
     stream: bool | None = None
     modalities: list[str] | None = None
     messages: list[dict[str, object]] | None = None
@@ -156,6 +159,18 @@ def require_editable_task_id(body: EditableFileTaskRequest, request: Request) ->
             },
         )
     return client_task_id
+
+
+def _models_unavailable_http_exception(exc: Exception) -> HTTPException:
+    logger.error({
+        "event": "list_models_failed",
+        "error_type": exc.__class__.__name__,
+        "error": diagnostic_excerpt(exc, 1000),
+    })
+    return HTTPException(
+        status_code=502,
+        detail={"error": MODELS_UNAVAILABLE_PUBLIC_MESSAGE},
+    )
 
 
 def require_non_empty_text(value: object, field_name: str) -> str:
@@ -277,6 +292,7 @@ async def _run_image_protocol_call(
         image_request=True,
         idempotency_key=idempotency_key,
         idempotency_aliases=idempotency_aliases,
+        units=image_quota_units_from_request(payload),
     )
     try:
         async def prepare_and_commit_quota() -> None:
@@ -341,7 +357,7 @@ def create_router() -> APIRouter:
         try:
             return await run_in_threadpool(openai_v1_models.list_models)
         except Exception as exc:
-            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+            raise _models_unavailable_http_exception(exc) from exc
 
     @router.post("/v1/images/generations")
     async def generate_images(

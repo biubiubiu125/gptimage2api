@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -306,6 +307,7 @@ IMAGE_TASK_PENDING_PUBLIC_MESSAGE = (
 IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE = (
     "The saved image result is unavailable. Please try again."
 )
+IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE = "image task not found"
 IMAGE_DELIVERY_FAILED_PUBLIC_MESSAGE = (
     "The generated image could not be delivered. Please try again."
 )
@@ -356,6 +358,22 @@ def _is_structured_failure_code(text: str) -> bool:
     )
 
 
+_PUBLIC_URL_RE = re.compile(
+    r"(?i)\b(?:https?|socks5h?|socks5|postgres(?:ql)?(?:\+\w+)?)://[^\s\"'<>]+"
+)
+
+
+def redact_public_urls(text: str) -> str:
+    return _PUBLIC_URL_RE.sub("[url redacted]", str(text or ""))
+
+
+IMAGE_URL_FETCH_FAILED_PUBLIC_MESSAGE = "image_url fetch failed"
+
+
+def public_image_url_fetch_error_message(_detail: object = None) -> str:
+    return IMAGE_URL_FETCH_FAILED_PUBLIC_MESSAGE
+
+
 def _safe_public_text(value: Any) -> str:
     if isinstance(value, Mapping):
         error = value.get("error")
@@ -377,7 +395,10 @@ def _safe_public_text(value: Any) -> str:
         return ""
     if _is_structured_text_payload(text) or _is_structured_failure_code(text):
         return ""
-    return text
+    redacted = redact_public_urls(text).strip()
+    if not redacted.replace("[url redacted]", "").strip():
+        return ""
+    return redacted
 
 
 def _public_upstream_text(

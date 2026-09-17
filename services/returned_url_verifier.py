@@ -14,6 +14,7 @@ from services.browser_fingerprint import (
     chrome146_session_kwargs,
     chrome146_signed_asset_headers,
 )
+from services.image_delivery import _is_local_or_private_host
 from services.image_url import normalize_url_origin
 
 
@@ -178,11 +179,7 @@ def _curl_resolve_address(address: str) -> str:
 
 
 def _reject_private_or_local_address(address: str) -> None:
-    try:
-        parsed_ip = ip_address(address)
-    except ValueError:
-        return
-    if not parsed_ip.is_global:
+    if _is_local_or_private_host(address):
         raise ReturnedUrlVerificationError("returned image URL resolves to a private or local address")
 
 
@@ -192,8 +189,7 @@ def _validate_public_host(parsed, *, resolve_dns: bool = True) -> tuple[str, ...
     host = str(parsed.hostname or "").strip()
     if not host:
         raise ReturnedUrlVerificationError("returned image URL must include a host")
-    lowered = host.rstrip(".").lower()
-    if lowered == "localhost" or lowered.endswith(".localhost"):
+    if _is_local_or_private_host(host):
         raise ReturnedUrlVerificationError("returned image URL resolves to a private or local address")
     try:
         parsed.port
@@ -245,14 +241,22 @@ def _build_verified_returned_image_request(
     return request
 
 
-def validate_public_image_base_url(value: object, *, resolve_host: bool = False) -> str:
+def validate_public_image_base_url(
+    value: object,
+    *,
+    resolve_host: bool = False,
+    require_public_host: bool = True,
+) -> str:
     text = str(value or "").strip().rstrip("/")
     parsed = urlsplit(text)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.query or parsed.fragment:
         raise ReturnedUrlVerificationError(
             "worker image base URL must be an http or https URL without query or fragment"
         )
-    _validate_public_host(parsed, resolve_dns=resolve_host)
+    if parsed.username is not None or parsed.password is not None:
+        raise ReturnedUrlVerificationError("returned image URL must not include credentials")
+    if require_public_host:
+        _validate_public_host(parsed, resolve_dns=resolve_host)
     path = parsed.path.rstrip("/")
     if path not in {"", "/images"}:
         raise ReturnedUrlVerificationError("worker image base URL path must be empty or /images")

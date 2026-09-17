@@ -234,6 +234,17 @@ class ArtifactService:
     def _public_url(relative_path: str, base_url: str) -> str:
         return build_public_image_url(base_url, relative_path)
 
+    def _publish_local_queue_catalog(
+        self,
+        relative_path: str,
+        payload: bytes,
+        base_url: str,
+    ) -> object:
+        save_at_path = getattr(self.storage_service, "save_at_path", None)
+        if not callable(save_at_path):
+            raise InvalidImageArtifact("storage service cannot save artifacts")
+        return save_at_path(relative_path, payload, base_url, local_only=True)
+
     def _persist(
         self,
         *,
@@ -352,42 +363,18 @@ class ArtifactService:
                 public_url = self._public_url(relative_path, base_url) if kind == "final" else ""
                 storage_backend = "local" if kind == "final" else "private_local"
             else:
-                settings_getter = getattr(self.storage_service, "settings", None)
-                if callable(settings_getter):
-                    try:
-                        shared_storage_settings = settings_getter()
-                    except Exception:
-                        shared_storage_settings = None
-                stored = self.storage_service.save_at_path(relative_path, png_bytes, base_url)
+                self._publish_local_queue_catalog(relative_path, png_bytes, base_url)
                 shared_storage_committed = True
-                remote_reader = _remote_reader(self.storage_service)
-                storage_backend = str(getattr(stored, "storage", "") or "").strip().lower()
-                if storage_backend in {"local", "both"}:
-                    persisted = _read_path_bytes(target)
-                    _verify_persisted_payload(
-                        persisted,
-                        digest=digest,
-                        expected_width=verified.width,
-                        expected_height=verified.height,
-                        label="stored",
-                    )
-                if _uses_shared_remote_storage(storage_backend):
-                    if not callable(remote_reader):
-                        raise InvalidImageArtifact("remote artifact reader is unavailable")
-                    try:
-                        remote_payload = remote_reader(relative_path)
-                    except Exception as exc:
-                        raise InvalidImageArtifact("remote artifact is unreadable") from exc
-                    _verify_persisted_payload(
-                        remote_payload,
-                        digest=digest,
-                        expected_width=verified.width,
-                        expected_height=verified.height,
-                        label="remote",
-                    )
-                if storage_backend == "webdav":
-                    _discard_local_path(self.root, relative_path)
-                public_url = stored.url if kind == "final" else ""
+                persisted = _read_path_bytes(target)
+                _verify_persisted_payload(
+                    persisted,
+                    digest=digest,
+                    expected_width=verified.width,
+                    expected_height=verified.height,
+                    label="stored",
+                )
+                public_url = self._public_url(relative_path, base_url) if kind == "final" else ""
+                storage_backend = "local"
         except Exception:
             if kind in {"input", "mask"} and self.storage_service is not None and private_storage_attempted:
                 remote_delete = getattr(self.storage_service, "delete_artifact", None)
@@ -764,22 +751,17 @@ class ArtifactService:
                 public_url = self._public_url(relative_path, base_url)
                 storage_backend = "local"
             else:
-                stored = self.storage_service.save_at_path(relative_path, payload, base_url)
-                remote_reader = _remote_reader(self.storage_service)
-                if _uses_shared_remote_storage(getattr(stored, "storage", "")) and callable(remote_reader):
-                    try:
-                        remote_payload = remote_reader(relative_path)
-                        remote_verified = verify_image_bytes(remote_payload)
-                    except Exception as exc:
-                        raise InvalidImageArtifact("remote artifact is unreadable") from exc
-                    if sha256(remote_payload).hexdigest() != digest:
-                        raise InvalidImageArtifact("remote artifact checksum mismatch")
-                    if (remote_verified.width, remote_verified.height) != (verified.width, verified.height):
-                        raise InvalidImageArtifact("remote artifact dimensions changed")
-                public_url = stored.url
-                storage_backend = str(getattr(stored, "storage", "") or "").strip().lower()
-                if storage_backend == "webdav":
-                    _discard_local_path(self.root, relative_path)
+                self._publish_local_queue_catalog(relative_path, payload, base_url)
+                persisted = _read_path_bytes(path)
+                _verify_persisted_payload(
+                    persisted,
+                    digest=digest,
+                    expected_width=verified.width,
+                    expected_height=verified.height,
+                    label="stored",
+                )
+                public_url = self._public_url(relative_path, base_url)
+                storage_backend = "local"
         except Exception:
             if self.storage_service is not None:
                 shared_delete = getattr(self.storage_service, "delete", None)

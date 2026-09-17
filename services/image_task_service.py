@@ -14,11 +14,12 @@ from uuid import UUID, uuid4
 from services.config import config
 from services.image_delivery import (
     URL_ONLY_DELIVERY_MODE,
+    is_public_delivery_base_url,
     is_url_only_delivery_mode,
     is_url_only_result,
     url_only_result_matches_base_url,
 )
-from services.image_failure import image_failure
+from services.image_failure import IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE, image_failure
 from services.image_task_view import canonical_image_task_status
 from services.image_url import build_public_image_url
 from services.proxy_service import proxy_settings
@@ -104,6 +105,8 @@ def _public_result_item(value: object) -> dict[str, Any]:
         "source_url",
         "sourceUrl",
         "_account_email",
+        "worker_id",
+        "image_base_url",
     ):
         item.pop(key, None)
     return item
@@ -443,12 +446,10 @@ class ImageTaskService:
         account_email: str = "",
     ) -> dict[str, Any]:
         public_url = ""
-        if url_only_delivery and delivery_base_url:
+        if delivery_base_url:
             public_url = build_public_image_url(delivery_base_url, artifact.relative_path)
         else:
             public_url = _clean(artifact.public_url)
-            if not public_url and delivery_base_url:
-                public_url = build_public_image_url(delivery_base_url, artifact.relative_path)
         result: dict[str, Any] = {
             "url": public_url,
             "width": artifact.width,
@@ -635,9 +636,8 @@ class ImageTaskService:
                     "count": reconciled_reservations,
                 })
             if self.artifact_service is None:
-                # The in-process Image Queue owns public image files.  Do not
-                # inherit a WebDAV/shared-image backend from a copied config file;
-                # the result URL must remain bound to this app instance.
+                # Queue finals stay on this app's local image root and are only
+                # catalogued locally. Gallery WebDAV is not used for result URLs.
                 storage_service = self._artifact_storage_service()
                 self.artifact_service = ArtifactService(self.settings.artifact_root, storage_service)
             storage_cleanup = getattr(
@@ -957,7 +957,12 @@ class ImageTaskService:
                 ):
                     returned_url = _clean(item.get("returned_url") or item.get("url"))
                     try:
-                        self._verify_returned_url(returned_url, allowed_base_url=allowed_base_url)
+                        self._verify_app_image_delivery(
+                            item,
+                            artifact,
+                            returned_url,
+                            allowed_base_url=allowed_base_url,
+                        )
                     except Exception as exc:
                         worker_id = self._delivery_worker_id(item, artifact_history)
                         if worker_id:
@@ -1034,19 +1039,20 @@ class ImageTaskService:
                     or getattr(artifact, "public_url", "")
                 )
                 if (
-                    public_url
-                    and _clean(getattr(artifact, "storage_backend", "")).lower()
-                    not in {"webdav", "both"}
-                    and self.settings.verify_returned_url
+                    self.settings.verify_returned_url
                     and snapshot.delivery_status != DeliveryStatus.ACKNOWLEDGED
                     and (force_url_verification or snapshot.delivery_status == DeliveryStatus.PENDING)
                 ):
-                    allowed_base_url = self._returned_url_allowed_base(
-                        item,
-                        artifact_history,
-                    )
+                    allowed_base_url = ""
+                    if _clean(getattr(artifact, "storage_backend", "")).lower() in {"webdav", "both"}:
+                        allowed_base_url = self._returned_url_allowed_base(
+                            item,
+                            artifact_history,
+                        )
                     try:
-                        self._verify_returned_url(
+                        self._verify_app_image_delivery(
+                            item,
+                            artifact,
                             public_url,
                             allowed_base_url=allowed_base_url,
                         )
@@ -1056,32 +1062,6 @@ class ImageTaskService:
                             snapshot,
                             item,
                             public_url,
-                            exc,
-                            artifact_history,
-                        )
-                        if failed is None:
-                            raise
-                        self._handle_task_state_change_safely(failed.id)
-                        if artifact is not None and artifact.job_id is not None:
-                            failed_delivery_job_ids.add(artifact.job_id)
-                        delivery_failure_snapshot = failed
-                        delivery_failure_error = delivery_failure_error or exc
-                        continue
-                remote_public_url = self._remote_public_artifact_url(item, artifact)
-                if (
-                    remote_public_url
-                    and self.settings.verify_returned_url
-                    and snapshot.delivery_status != DeliveryStatus.ACKNOWLEDGED
-                    and (force_url_verification or snapshot.delivery_status == DeliveryStatus.PENDING)
-                ):
-                    try:
-                        self._verify_returned_url(remote_public_url)
-                    except Exception as exc:
-                        failed = self._fail_undeliverable_url_result(
-                            owner,
-                            snapshot,
-                            item,
-                            remote_public_url,
                             exc,
                             artifact_history,
                         )
@@ -1231,6 +1211,26 @@ class ImageTaskService:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             return ""
         return url
+
+    def _verify_app_image_delivery(
+        self,
+        item: Mapping[str, Any],
+        artifact: ArtifactDescriptor | None,
+        url: str,
+        *,
+        allowed_base_url: str = "",
+    ) -> None:
+        relative_path = _clean(item.get("relative_path") or getattr(artifact, "relative_path", ""))
+        storage_backend = _clean(getattr(artifact, "storage_backend", "")).lower()
+        if storage_backend not in {"webdav", "both"}:
+            if not relative_path:
+                raise InvalidImageArtifact("image result artifact not found")
+            self.verify_public_image_route(relative_path)
+            return
+        verify_url = self._remote_public_artifact_url(item, artifact) or _clean(url)
+        if not verify_url:
+            raise InvalidImageArtifact("invalid image result")
+        self._verify_returned_url(verify_url, allowed_base_url=allowed_base_url)
 
     @staticmethod
     def _delivery_artifact(
@@ -2173,7 +2173,7 @@ class ImageTaskService:
             account_email = ""
         worker_image_base_url = self._worker_image_base_url()
         delivery_base_url = worker_image_base_url or _clean(payload.get("base_url"))
-        url_only_delivery = False
+        url_only_delivery = is_public_delivery_base_url(delivery_base_url)
         artifact_history = repository.list_artifacts(claim.job.task_id)
 
         def preferred_artifact_sha256(kind: str) -> str:
@@ -3017,11 +3017,16 @@ class ImageTaskService:
         owner = _owner_key(identity)
         task = repository.get_task(owner, task_id)
         if task is None:
-            raise ValueError(
-                "image task not found; if multiple gptimage2api instances share a "
-                "load balancer without sticky sessions, use shared PostgreSQL and "
-                "node-owned image URL delivery, or enable request affinity"
-            )
+            logger.warning({
+                "event": "image_task_not_found",
+                "task_id": str(task_id or ""),
+                "hint": (
+                    "if multiple gptimage2api instances share a load balancer "
+                    "without sticky sessions, use shared PostgreSQL and "
+                    "node-owned image URL delivery, or enable request affinity"
+                ),
+            })
+            raise ValueError(IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE)
         task = self._ensure_deliverable_task(
             owner,
             task,

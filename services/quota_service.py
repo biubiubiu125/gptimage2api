@@ -28,6 +28,7 @@ QUOTA_LIMIT_KEYS = {
 QUOTA_USAGE_PATH = DATA_DIR / "quota_usage.json"
 QUOTA_RESERVATION_TTL_SECONDS = 15 * 60
 QUOTA_RESERVATION_PROTOCOL_GRACE_SECONDS = 60
+IMAGE_QUOTA_MAX_UNITS = 4
 
 
 class QuotaExceededError(RuntimeError):
@@ -46,6 +47,7 @@ class QuotaReservation:
     scope: str = ""
     dedupe_key: str = ""
     dedupe_keys: tuple[str, ...] = ()
+    units: int = 1
     cancelable: bool = True
     committed: bool = False
     canceled: bool = False
@@ -60,6 +62,7 @@ class QuotaReservation:
             scope=self.scope,
             dedupe_key=self.dedupe_key,
             dedupe_keys=self.dedupe_keys,
+            units=self.units,
         )
         self.committed = True
 
@@ -75,6 +78,46 @@ class QuotaReservation:
 
 def _today_beijing() -> str:
     return datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+
+
+def image_quota_units(value: object) -> int:
+    try:
+        units = int(value or 1)
+    except (OverflowError, TypeError, ValueError):
+        units = 1
+    return min(IMAGE_QUOTA_MAX_UNITS, max(1, units))
+
+
+def image_quota_units_from_request(payload: object) -> int:
+    source = payload if isinstance(payload, Mapping) else {}
+    count_source = source.get("n")
+    tools = source.get("tools")
+    if isinstance(tools, (list, tuple)):
+        for tool in tools:
+            if not isinstance(tool, Mapping):
+                continue
+            if str(tool.get("type") or "").strip() != "image_generation":
+                continue
+            if tool.get("n") not in (None, ""):
+                count_source = tool.get("n")
+            break
+    return image_quota_units(count_source)
+
+
+def _reservation_units(item: Mapping[str, object] | None) -> int:
+    if not isinstance(item, Mapping):
+        return 1
+    return image_quota_units(item.get("units"))
+
+
+def _pending_units(reservations: Mapping[str, object], identity_id: str, scope: str) -> int:
+    total = 0
+    for item in reservations.values():
+        if not isinstance(item, dict):
+            continue
+        if item.get("identity_id") == identity_id and item.get("scope") == scope:
+            total += _reservation_units(item)
+    return total
 
 
 def _identity_id(identity: dict[str, object]) -> str:
@@ -180,14 +223,16 @@ class QuotaService:
         *,
         idempotency_key: str = "",
         idempotency_aliases: Iterable[object] | None = None,
+        units: int = 1,
     ) -> QuotaReservation:
+        units = image_quota_units(units)
         settings = self.settings_provider()
         if not settings.get("enabled", True):
-            return QuotaReservation(self, "", "")
+            return QuotaReservation(self, "", "", units=units)
         normalized_scope = _normalize_scope(scope)
         limit = self._limit(settings, normalized_scope)
         if limit < 0:
-            return QuotaReservation(self, "", "")
+            return QuotaReservation(self, "", "", units=units)
         identity_id = _identity_id(identity)
         today = str(self.today_provider()).strip()
         dedupe_keys = self._dedupe_keys(
@@ -203,7 +248,7 @@ class QuotaService:
             state = self._load(today)
             idempotency = state.setdefault("idempotency", {})
             if dedupe_keys and any(idempotency.get(key) for key in dedupe_keys):
-                return QuotaReservation(self, today, "")
+                return QuotaReservation(self, today, "", units=units)
             reservations = self._active_reservations(state)
             if dedupe_keys:
                 requested_keys = set(dedupe_keys)
@@ -218,23 +263,21 @@ class QuotaService:
                             scope=normalized_scope,
                             dedupe_key=active_keys[0] if active_keys else dedupe_key,
                             dedupe_keys=active_keys,
+                            units=_reservation_units(item),
                             cancelable=False,
                         )
             usage = state.setdefault("usage", {})
             user_usage = usage.setdefault(identity_id, {})
             current = max(0, int(user_usage.get(normalized_scope) or 0))
-            pending = sum(
-                1
-                for item in reservations.values()
-                if item.get("identity_id") == identity_id and item.get("scope") == normalized_scope
-            )
-            if current + pending >= limit:
+            pending = _pending_units(reservations, identity_id, normalized_scope)
+            if current + pending + units > limit:
                 raise QuotaExceededError(normalized_scope, limit)
             reservations[reservation_id] = {
                 "identity_id": identity_id,
                 "scope": normalized_scope,
                 "dedupe_key": dedupe_key,
                 "dedupe_keys": list(dedupe_keys),
+                "units": units,
                 "created_at": time.time(),
             }
             state["reservations"] = reservations
@@ -247,6 +290,7 @@ class QuotaService:
             scope=normalized_scope,
             dedupe_key=dedupe_key,
             dedupe_keys=dedupe_keys,
+            units=units,
         )
 
     def commit_reservation(
@@ -258,6 +302,7 @@ class QuotaService:
         scope: str = "",
         dedupe_key: str = "",
         dedupe_keys: Iterable[object] | None = None,
+        units: int = 1,
     ) -> None:
         if not reservation_id:
             return
@@ -279,16 +324,13 @@ class QuotaService:
                         usage = state.setdefault("usage", {})
                         user_usage = usage.setdefault(identity_id, {})
                         current = max(0, int(user_usage.get(normalized_scope) or 0))
-                        pending = sum(
-                            1
-                            for item in reservations.values()
-                            if item.get("identity_id") == identity_id and item.get("scope") == normalized_scope
-                        )
-                        if limit >= 0 and current + pending >= limit:
+                        pending = _pending_units(reservations, identity_id, normalized_scope)
+                        late_units = image_quota_units(units)
+                        if limit >= 0 and current + pending + late_units > limit:
                             state["reservations"] = reservations
                             write_json_file(self.path, state)
                             raise QuotaExceededError(normalized_scope, limit)
-                        user_usage[normalized_scope] = current + 1
+                        user_usage[normalized_scope] = current + late_units
                         for key in commit_keys:
                             idempotency[key] = True
                 state["reservations"] = reservations
@@ -302,7 +344,7 @@ class QuotaService:
                 usage = state.setdefault("usage", {})
                 user_usage = usage.setdefault(identity_id, {})
                 current = max(0, int(user_usage.get(scope) or 0))
-                user_usage[scope] = current + 1
+                user_usage[scope] = current + _reservation_units(reservation)
                 for key in dedupe_keys:
                     idempotency[key] = True
             state["reservations"] = reservations
@@ -360,7 +402,7 @@ class QuotaService:
                 scope = _normalize_scope(str(reservation.get("scope") or ""))
                 if not any(idempotency.get(key) for key in keys):
                     user_usage = usage.setdefault(identity_id, {})
-                    user_usage[scope] = max(0, int(user_usage.get(scope) or 0)) + 1
+                    user_usage[scope] = max(0, int(user_usage.get(scope) or 0)) + _reservation_units(reservation)
                     for key in keys:
                         idempotency[key] = True
                 reservations.pop(reservation_id, None)
@@ -500,6 +542,7 @@ def reserve_quota(
     image_request: bool = False,
     idempotency_key: str = "",
     idempotency_aliases: Iterable[object] | None = None,
+    units: object = 1,
 ) -> QuotaReservation:
     scope = quota_scope_for_request(endpoint, model, image_request=image_request)
     try:
@@ -508,6 +551,7 @@ def reserve_quota(
             scope,
             idempotency_key=idempotency_key,
             idempotency_aliases=idempotency_aliases,
+            units=image_quota_units(units),
         )
     except QuotaExceededError as exc:
         raise HTTPException(

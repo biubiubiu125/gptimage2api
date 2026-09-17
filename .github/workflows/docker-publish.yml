@@ -37,7 +37,7 @@ jobs:
 
       - name: Test backend
         run: |
-          if [ -d tests ] && ls tests/test_*.py >/dev/null 2>&1; then
+          if [ -d tests ] && find tests -name 'test_*.py' -print -quit | grep -q .; then
             uv run python -m pytest -q -p no:cacheprovider
           else
             echo "No committed tests; skip pytest"

@@ -31,10 +31,16 @@ from services.image_queue.resource_controller import (
     ImageQueueResourcePressureError,
     ImageQueueStorageFullError,
 )
-from services.image_failure import image_failure, image_queue_http_message, public_image_error_message
+from services.image_failure import (
+    IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE,
+    IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE,
+    image_failure,
+    image_queue_http_message,
+    public_image_error_message,
+)
 from services.image_task_view import canonical_image_task_status, image_task_page, image_task_row
 from services.log_service import LoggedCall
-from services.quota_service import reserve_quota
+from services.quota_service import image_quota_units, reserve_quota
 
 
 logger = logging.getLogger(__name__)
@@ -168,6 +174,31 @@ def _image_queue_http_exception(exc: Exception) -> HTTPException:
     return HTTPException(status_code=503, detail=detail)
 
 
+def _image_task_not_found_http_exception(task_id: str = "") -> HTTPException:
+    detail: dict[str, object] = {
+        "error": "image_task_not_found",
+        "message": IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE,
+    }
+    if task_id:
+        detail["task_id"] = task_id
+    return HTTPException(status_code=404, detail=detail)
+
+
+def _image_result_unavailable_http_exception(
+    exc: Exception | None = None,
+    *,
+    task_id: str = "",
+) -> HTTPException:
+    del exc
+    detail: dict[str, object] = {
+        "error": "image_result_unavailable",
+        "message": IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE,
+    }
+    if task_id:
+        detail["task_id"] = task_id
+    return HTTPException(status_code=409, detail=detail)
+
+
 def _image_stream_error_payload(exc: Exception, task_id: str) -> dict[str, object]:
     if isinstance(exc, _IMAGE_QUEUE_ERRORS):
         detail = _image_queue_http_exception(exc).detail
@@ -279,10 +310,7 @@ def create_router() -> APIRouter:
             )
             return _public_task_page(result)
         except InvalidImageArtifact as exc:
-            raise HTTPException(
-                status_code=409,
-                detail={"error": "image_result_unavailable", "message": str(exc)},
-            ) from exc
+            raise _image_result_unavailable_http_exception(exc) from exc
         except _IMAGE_QUEUE_ERRORS as exc:
             raise _image_queue_http_exception(exc) from exc
 
@@ -314,6 +342,7 @@ def create_router() -> APIRouter:
                 image_request=True,
                 idempotency_key=idempotency_key,
                 idempotency_aliases=[body.client_task_id],
+                units=body.n,
             )
             try:
                 result = await run_in_threadpool(
@@ -384,6 +413,7 @@ def create_router() -> APIRouter:
                 image_request=True,
                 idempotency_key=idempotency_key,
                 idempotency_aliases=[client_task_id],
+                units=image_quota_units(payload.get("n")),
             )
             source_request_hash = image_edit_source_request_hash(payload, image_sources, mask_sources)
             existing = await run_in_threadpool(
@@ -515,26 +545,11 @@ def create_router() -> APIRouter:
             result = await run_in_threadpool(image_task_service.get_task, identity, task_id)
             return _public_task_row(result)
         except InvalidImageArtifact as exc:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": "image_result_unavailable",
-                    "message": str(exc),
-                    "task_id": task_id,
-                },
-            ) from exc
+            raise _image_result_unavailable_http_exception(exc, task_id=task_id) from exc
         except _IMAGE_QUEUE_ERRORS as exc:
             raise _image_queue_http_exception(exc) from exc
         except ValueError as exc:
-            message = str(exc)
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "error": "image_task_not_found",
-                    "message": message,
-                    "task_id": task_id,
-                },
-            ) from exc
+            raise _image_task_not_found_http_exception(task_id) from exc
 
     @router.post("/api/image-tasks/{task_id}/cancel", response_model=ImageTaskResponse)
     async def cancel_image_task(
@@ -548,7 +563,7 @@ def create_router() -> APIRouter:
         except _IMAGE_QUEUE_ERRORS as exc:
             raise _image_queue_http_exception(exc) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail={"error": str(exc)}) from exc
+            raise _image_task_not_found_http_exception(task_id) from exc
 
     @router.post("/api/image-tasks/{task_id}/ack", response_model=ImageTaskResponse)
     async def acknowledge_image_task(
@@ -565,14 +580,11 @@ def create_router() -> APIRouter:
                 detail={"error": exc.code, "message": str(exc)},
             ) from exc
         except InvalidImageArtifact as exc:
-            raise HTTPException(
-                status_code=409,
-                detail={"error": "image_result_unavailable", "message": str(exc)},
-            ) from exc
+            raise _image_result_unavailable_http_exception(exc, task_id=task_id) from exc
         except _IMAGE_QUEUE_ERRORS as exc:
             raise _image_queue_http_exception(exc) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail={"error": str(exc)}) from exc
+            raise _image_task_not_found_http_exception(task_id) from exc
 
     @router.get("/api/image-tasks/{task_id}/stream")
     async def stream_image_task(
@@ -598,9 +610,9 @@ def create_router() -> APIRouter:
         except _IMAGE_QUEUE_ERRORS as exc:
             raise _image_queue_http_exception(exc) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail={"error": str(exc)}) from exc
+            raise _image_task_not_found_http_exception(task_id) from exc
         if not snapshot:
-            raise HTTPException(status_code=404, detail={"error": "image task not found"})
+            raise _image_task_not_found_http_exception(task_id)
 
         mode = str(snapshot.get("mode") or "generate")
         event_prefix = "image_edit" if mode == "edit" else "image_generation"

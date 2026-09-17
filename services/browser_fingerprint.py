@@ -17,6 +17,13 @@ def _load_chrome146_user_agent() -> str:
 
 
 CHROME146_USER_AGENT = _load_chrome146_user_agent()
+
+
+def is_chrome146_user_agent(value: object) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and "Chrome/146.0.0.0" in text
+
+
 CHROME146_SEC_CH_UA = '"Google Chrome";v="146", "Chromium";v="146", "Not.A/Brand";v="24"'
 CHROME146_SEC_CH_UA_FULL_VERSION = '"146.0.0.0"'
 CHROME146_SEC_CH_UA_FULL_VERSION_LIST = (

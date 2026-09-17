@@ -64,7 +64,7 @@ services:
       - ./data:/app/data
       - ./config.json:/app/config.json
     environment:
-      GPTIMAGE2API_AUTH_KEY: ${GPTIMAGE2API_AUTH_KEY:-}
+      GPTIMAGE2API_AUTH_KEY: ${GPTIMAGE2API_AUTH_KEY:?Set GPTIMAGE2API_AUTH_KEY in .env}
       GPTIMAGE2API_REGISTER_RECOVERY_KEY: ${GPTIMAGE2API_REGISTER_RECOVERY_KEY:-}
       GPTIMAGE2API_BASE_URL: ${GPTIMAGE2API_BASE_URL:-}
       GPTIMAGE2API_GITHUB_REPOSITORY: ${GPTIMAGE2API_GITHUB_REPOSITORY:-biubiubiu125/gptimage2api}
@@ -87,7 +87,7 @@ services:
     # 本地 Compose 与生产 Compose 保持相同的单体边界：一个 App、一个 PostgreSQL，
     # PostgreSQL 内分离 Application Database 与 Image Queue Store。
 
-    # 认证密钥 (可选，覆盖 config.json)
+    # 认证密钥（必填，覆盖 config.json）
     #   GPTIMAGE2API_AUTH_KEY: your_secret_key
 
     # 基础 URL (可选)

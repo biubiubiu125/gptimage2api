@@ -195,11 +195,15 @@ def _retention_cleanup_targets(retention_hours: int) -> list[tuple[str, int]]:
         offset=0,
         media_type="all",
     )
-    return [
+    expired = [
         (str(item["path"]), int(item["size_bytes"]))
         for item in projection["items"]
         if item["expired"] and item["local"]
     ]
+    if not expired:
+        return []
+    _queue_service, catalog = _queue_public_final_catalog()
+    return [(rel, size) for rel, size in expired if rel not in catalog]
 
 
 def preview_image_retention_cleanup(retention_hours: int | None = None) -> dict[str, int | bool]:
@@ -218,28 +222,7 @@ def cleanup_image_retention(retention_hours: int | None = None) -> dict[str, int
     targets = _retention_cleanup_targets(hours)
     removed = 0
     removed_size_bytes = 0
-    queue_service = None
-    queue_catalog: dict[str, dict[str, object]] = {}
-    if targets:
-        queue_service, queue_catalog = _queue_public_final_catalog()
-    queue_targets = [
-        (rel, size)
-        for rel, size in targets
-        if rel in queue_catalog and not bool(queue_catalog[rel].get("webdav"))
-    ]
-    queue_target_rels = {rel for rel, _size in queue_targets}
-    target_sizes = {
-        rel: size
-        for rel, size in targets
-        if rel not in queue_target_rels
-    }
-    for rel, size in queue_targets:
-        assert queue_service is not None
-        if not queue_service.delete_public_final_artifact(rel):
-            raise ImageStorageError("queue image deletion was not completed")
-        removed += 1
-        removed_size_bytes += size
-        _remove_image_sidecars(rel)
+    target_sizes = {rel: size for rel, size in targets}
     removed_local = image_storage_service.delete_local_copies(list(target_sizes))
     for rel, remote_remains in removed_local.items():
         removed += 1

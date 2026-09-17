@@ -4,10 +4,8 @@ import re
 from collections.abc import Mapping
 from urllib.parse import urlsplit, urlunsplit
 
-from services.image_failure import ImageFailure, public_image_error_message
+from services.image_failure import ImageFailure, public_image_error_message, redact_public_urls
 
-
-_URL_RE = re.compile(r"(?i)\b(?:https?|socks5h?|socks5|postgres(?:ql)?(?:\+\w+)?)://[^\s\"'<>]+")
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _SENSITIVE_KEY_RE = re.compile(
     r"(?i)(^|[_-])("
@@ -106,14 +104,14 @@ def sanitize_delivery_url(value: object) -> str:
         ))[:1000]
     if text.startswith("/"):
         return text.split("?", 1)[0].split("#", 1)[0][:1000]
-    return _URL_RE.sub("[url redacted]", text)[:1000]
+    return redact_public_urls(text)[:1000]
 
 
 def safe_queue_error_message(error: BaseException, failure: ImageFailure) -> str:
     message = public_image_error_message(failure, error).strip()
     if not message:
         message = "Image generation failed. Please try again."
-    message = _URL_RE.sub("[url redacted]", message)
+    message = redact_public_urls(message)
     message = _BEARER_RE.sub("Bearer [redacted]", message)
     message = _SECRET_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[redacted]", message)
     return message[:1000]

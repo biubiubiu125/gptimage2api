@@ -15,7 +15,7 @@ from contracts.settings_specification import (
 )
 from services.json_file import read_json_object
 from services.browser_fingerprint import CHROME146_USER_AGENT
-from services.returned_url_verifier import validate_public_image_base_url
+from services.returned_url_verifier import ReturnedUrlVerificationError, validate_public_image_base_url
 from services.runtime_configuration import env_value
 from services.storage.base import StorageBackend
 from services.storage.configuration_repository import (
@@ -483,6 +483,16 @@ def _validate_image_storage_settings(settings: dict[str, object]) -> None:
         raise ValueError("启用 WebDAV 图片存储后必须填写 WebDAV 密码")
 
 
+def _normalize_app_base_url(value: object) -> str:
+    text = str(value or "").strip().rstrip("/")
+    if not text:
+        return ""
+    try:
+        return validate_public_image_base_url(text, require_public_host=False)
+    except ReturnedUrlVerificationError as exc:
+        raise ValueError("公开访问地址必须是有效的 HTTP(S) 地址，路径只能为空或 /images") from exc
+
+
 def _validate_genbox_push_settings(settings: dict[str, object]) -> None:
     if not _normalize_bool(settings.get("enabled"), False):
         return
@@ -498,8 +508,19 @@ def _normalize_auth_key(value: object) -> str:
     return str(value or "").strip()
 
 
+_PLACEHOLDER_AUTH_KEYS = frozenset({
+    "your_secret_key_here",
+    "your_real_auth_key",
+    "your-auth-key",
+    "your_secret_key",
+})
+
+
 def _is_invalid_auth_key(value: object) -> bool:
-    return _normalize_auth_key(value) == ""
+    normalized = _normalize_auth_key(value)
+    if not normalized:
+        return True
+    return normalized.casefold() in _PLACEHOLDER_AUTH_KEYS
 
 
 class ConfigStore:
@@ -526,12 +547,10 @@ class ConfigStore:
     def require_bootstrap_auth_key(self) -> None:
         if _is_invalid_auth_key(self.auth_key):
             raise ValueError(
-                "❌ auth-key 未设置！\n"
+                "❌ auth-key 未设置或仍是示例占位值！\n"
                 "请按以下任意一种方式解决：\n"
-                "1. 在 Render 的 Environment 变量中添加：\n"
-                "   GPTIMAGE2API_AUTH_KEY = your_real_auth_key\n"
-                "2. 或者在 config.json 中填写：\n"
-                '   "auth-key": "your_real_auth_key"'
+                "1. 在环境变量中设置私有 GPTIMAGE2API_AUTH_KEY\n"
+                "2. 或者在 config.json 中填写私有 auth-key"
             )
 
     def _load(self) -> dict[str, object]:
@@ -773,11 +792,11 @@ class ConfigStore:
 
     @property
     def base_url(self) -> str:
-        return str(
+        return _normalize_app_base_url(
             env_value("GPTIMAGE2API_BASE_URL", "CHATGPT2API_BASE_URL")
             or self.data.get("base_url")
             or ""
-        ).strip().rstrip("/")
+        )
 
     @property
     def app_version(self) -> str:
@@ -917,6 +936,8 @@ class ConfigStore:
                 updates["quota_limits"] = _normalize_quota_limits_settings(
                     updates.get("quota_limits")
                 )
+            if "base_url" in updates:
+                updates["base_url"] = _normalize_app_base_url(updates.get("base_url"))
             if "third_party_apps" in updates:
                 updates["third_party_apps"] = _normalize_third_party_apps_settings(updates.get("third_party_apps"))
             if "proxy_runtime" in updates:

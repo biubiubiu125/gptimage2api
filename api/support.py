@@ -113,15 +113,23 @@ def _is_local_request_host(hostname: str) -> bool:
         return False
 
 
+def _configured_app_base_url() -> str:
+    try:
+        return str(config.base_url or "").strip()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "base_url_invalid",
+                "message": str(exc),
+            },
+        ) from exc
+
+
 def resolve_image_base_url(request: Request) -> str:
-    base_url = config.base_url
+    base_url = _configured_app_base_url()
     if base_url:
         return base_url
-    storage_settings_getter = getattr(config, "get_image_storage_settings", None)
-    if callable(storage_settings_getter):
-        public_base_url = str(storage_settings_getter().get("public_base_url") or "").strip().rstrip("/")
-        if public_base_url:
-            return public_base_url
     hostname = str(request.url.hostname or "").strip()
     if _is_local_request_host(hostname):
         return f"{request.url.scheme}://{request.url.netloc}"
@@ -138,7 +146,7 @@ def resolve_image_base_url(request: Request) -> str:
 
 
 def resolve_api_base_url(request: Request) -> str:
-    base_url = config.base_url
+    base_url = _configured_app_base_url()
     if base_url:
         return base_url
     hostname = str(request.url.hostname or "").strip()

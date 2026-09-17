@@ -19,6 +19,8 @@ from fastapi.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
 from services.browser_fingerprint import CHROME146_USER_AGENT, chrome146_headers
+from services.image_delivery import _is_local_or_private_host
+from services.image_failure import public_image_url_fetch_error_message
 from services.proxy_service import proxy_settings
 
 ImageInput = tuple[bytes, str, str]
@@ -375,7 +377,7 @@ def _validate_public_image_url(source: str) -> tuple[ParseResult, tuple[str, ...
     if not hostname:
         raise HTTPException(status_code=400, detail={"error": "invalid image_url host"})
     normalized_host = hostname.rstrip(".").lower()
-    if normalized_host in {"localhost", "localhost.localdomain"} or normalized_host.endswith(".local"):
+    if _is_local_or_private_host(normalized_host):
         raise HTTPException(status_code=400, detail={"error": "image_url host is not publicly reachable"})
     try:
         literal = ipaddress.ip_address(normalized_host)
@@ -389,7 +391,7 @@ def _validate_public_image_url(source: str) -> tuple[ParseResult, tuple[str, ...
             addresses = [item[4][0] for item in socket.getaddrinfo(normalized_host, port, type=socket.SOCK_STREAM)]
         except OSError as exc:
             raise HTTPException(status_code=400, detail={"error": "image_url host could not be resolved"}) from exc
-    if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
+    if not addresses or any(_is_local_or_private_host(address) for address in addresses):
         raise HTTPException(status_code=400, detail={"error": "image_url host is not publicly reachable"})
     return parsed, tuple(dict.fromkeys(addresses))
 
@@ -452,7 +454,10 @@ def _read_response_limited(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail={"error": f"image_url fetch failed: {exc}"}) from exc
+        raise HTTPException(
+            status_code=400,
+            detail={"error": public_image_url_fetch_error_message(exc)},
+        ) from exc
     return bytes(data)
 
 
@@ -505,7 +510,10 @@ def _download_image_url(
         except Exception as exc:
             if acquired:
                 _IMAGE_FETCH_SLOTS.release()
-            raise HTTPException(status_code=400, detail={"error": f"image_url fetch failed: {exc}"}) from exc
+            raise HTTPException(
+                status_code=400,
+                detail={"error": public_image_url_fetch_error_message(exc)},
+            ) from exc
         try:
             if 300 <= response.status_code < 400:
                 if redirect_count >= MAX_IMAGE_REDIRECTS:

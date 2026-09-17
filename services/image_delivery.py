@@ -16,6 +16,16 @@ URL_ONLY_DELIVERY_MODES = {
 }
 
 
+def is_public_delivery_base_url(value: object) -> bool:
+    text = str(value or "").strip()
+    parsed = urlsplit(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    if parsed.username is not None or parsed.password is not None:
+        return False
+    return not _is_local_or_private_host(parsed.hostname or "")
+
+
 def is_url_only_delivery_mode(value: object) -> bool:
     normalized = str(value or "").strip().lower()
     if normalized in URL_ONLY_DELIVERY_MODES:
@@ -29,6 +39,7 @@ def _is_local_or_private_host(hostname: str) -> bool:
         return True
     if (
         value == "localhost"
+        or value == "localhost.localdomain"
         or value.endswith(".localhost")
         or value.endswith(".local")
         or value == "host.docker.internal"

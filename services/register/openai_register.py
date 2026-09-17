@@ -1126,7 +1126,7 @@ class PlatformRegistrar:
             self.clearance_user_agent = bundle.user_agent or self.clearance_user_agent
             step(index, "Cloudflare clearance 刷新完成，重试当前请求", "yellow")
         else:
-            self.clearance_failure_reason = "clearance 刷新未返回可用 Cookie，请检查 FlareSolverr URL、代理和出口 IP"
+            self.clearance_failure_reason = "clearance 刷新未返回可用 Cookie，请检查手动 Cookie 是否匹配 Chrome146"
             step(index, f"Cloudflare clearance 刷新失败：{self.clearance_failure_reason}", "yellow")
         return bundle
 

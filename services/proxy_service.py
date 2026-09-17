@@ -15,6 +15,7 @@ from curl_cffi.requests import Session
 from services.browser_fingerprint import (
     chrome146_headers,
     chrome146_session_kwargs,
+    is_chrome146_user_agent,
 )
 from services.config import DEFAULT_PROXY_RUNTIME_USER_AGENT, config
 from services.storage.configuration_repository import (
@@ -720,11 +721,15 @@ class ProxySettingsStore:
         return bundle
 
     def _build_manual_bundle(self, profile: ProxyRuntimeProfile, target_host: str) -> ClearanceBundle | None:
+        if not _is_clearance_cookie_host(target_host):
+            return None
         cookies = _parse_cookie_header(str(profile.clearance.get("cf_cookies") or ""))
         cf_clearance = str(profile.clearance.get("cf_clearance") or "").strip()
         if cf_clearance and "cf_clearance" not in cookies:
             cookies["cf_clearance"] = cf_clearance
         configured_user_agent = str(profile.clearance.get("user_agent") or "").strip()
+        if configured_user_agent and not is_chrome146_user_agent(configured_user_agent):
+            return None
         if not cookies and not configured_user_agent:
             return None
         user_agent = DEFAULT_PROXY_RUNTIME_USER_AGENT
@@ -769,6 +774,16 @@ def _colon_proxy_to_url(url: str) -> str:
 
 def _normalize_host(host: str) -> str:
     return str(host or "").strip().strip(".").lower()
+
+
+_CLEARANCE_COOKIE_ROOT_HOSTS = ("chatgpt.com", "chat.openai.com")
+
+
+def _is_clearance_cookie_host(host: str) -> bool:
+    value = _normalize_host(host)
+    if not value:
+        return False
+    return any(value == root or value.endswith("." + root) for root in _CLEARANCE_COOKIE_ROOT_HOSTS)
 
 
 def _host_from_url(url: str) -> str:

@@ -6,6 +6,7 @@ import mimetypes
 import time
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from datetime import date as calendar_date
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from threading import Lock
 from typing import Iterator
@@ -19,6 +20,7 @@ from PIL import Image, ImageOps
 from services.config import DATA_DIR, config
 from services.browser_fingerprint import chrome146_headers
 from services.image_failure import ImageFailureError, image_failure
+from services.image_url import build_public_image_url
 from services.http_target import build_http_target_request_options
 from services.proxy_service import proxy_settings
 from services.json_file import read_json_object, write_json_file
@@ -87,6 +89,33 @@ def _now_iso() -> str:
 
 def _mtime_date(path: Path) -> str:
     return beijing_datetime_from_timestamp(path.stat().st_mtime).strftime("%Y-%m-%d")
+
+
+def _catalog_date(rel: str, path: Path | None = None) -> str:
+    parts = str(rel or "").replace("\\", "/").split("/")
+    if len(parts) >= 4:
+        year, month, day = parts[0], parts[1], parts[2]
+        if (
+            len(year) == 4
+            and len(month) == 2
+            and len(day) == 2
+            and year.isdigit()
+            and month.isdigit()
+            and day.isdigit()
+        ):
+            try:
+                calendar_date(int(year), int(month), int(day))
+            except ValueError:
+                pass
+            else:
+                return f"{year}-{month}-{day}"
+    if path is not None:
+        try:
+            if path.is_file():
+                return _mtime_date(path)
+        except OSError:
+            pass
+    return beijing_now().strftime("%Y-%m-%d")
 
 
 def _mtime_datetime(path: Path) -> str:
@@ -467,7 +496,7 @@ class ImageStorageService:
             "rel": rel,
             "path": rel,
             "name": path.name,
-            "date": "-".join(rel.split("/")[:3]) if len(rel.split("/")) >= 4 else _mtime_date(path),
+            "date": _catalog_date(rel, path),
             "size": len(payload),
             "created_at": str(item.get("created_at") or _mtime_datetime(path)),
             "storage": "both",
@@ -479,15 +508,32 @@ class ImageStorageService:
             **({"width": dimensions[0], "height": dimensions[1]} if dimensions else {}),
         }
 
-    def _public_url(self, rel: str, base_url: str | None = None) -> str:
+    def _prefer_app_delivery_url(
+        self,
+        *,
+        local: bool,
+        webdav: bool,
+        local_only: bool = False,
+    ) -> bool:
+        if local_only:
+            return True
+        return bool(local) and not bool(webdav) and self.mode() in {"webdav", "both"}
+
+    def _public_url(
+        self,
+        rel: str,
+        base_url: str | None = None,
+        *,
+        prefer_app_base: bool = False,
+    ) -> str:
         settings = self.settings()
         public_base_url = _clean(settings.get("public_base_url"))
-        if public_base_url:
-            return f"{public_base_url.rstrip('/')}/{normalize_image_relative_path(rel)}"
-        return (
-            f"{(base_url or config.base_url).rstrip('/')}/images/"
-            f"{normalize_image_relative_path(rel)}"
-        )
+        app_prefix = _clean(base_url) or _clean(config.base_url)
+        if prefer_app_base:
+            prefix = app_prefix or public_base_url
+        else:
+            prefix = public_base_url or app_prefix
+        return build_public_image_url(prefix, normalize_image_relative_path(rel))
 
     def make_relative_path(self, image_data: bytes) -> str:
         file_hash = hashlib.md5(image_data).hexdigest()
@@ -535,7 +581,7 @@ class ImageStorageService:
                 "rel": rel,
                 "path": rel,
                 "name": Path(rel).name,
-                "date": "-".join(rel.split("/")[:3]),
+                "date": _catalog_date(rel, image_local_path(rel) if stored_local else None),
                 "size": len(image_data),
                 "created_at": _now_iso(),
                 "storage": "both" if stored_local and stored_webdav else ("webdav" if stored_webdav else "local"),
@@ -570,6 +616,8 @@ class ImageStorageService:
         relative_path: str,
         image_data: bytes,
         base_url: str | None = None,
+        *,
+        local_only: bool = False,
     ) -> StoredImage:
         rel = normalize_image_relative_path(relative_path)
         if not _is_image_rel(rel):
@@ -580,6 +628,9 @@ class ImageStorageService:
             mode = "local"
         stored_local = mode in {"local", "both"}
         stored_webdav = mode in {"webdav", "both"}
+        if local_only:
+            stored_local = True
+            stored_webdav = False
         remote_url = ""
         local_written = False
         remote_upload_attempted = False
@@ -608,7 +659,7 @@ class ImageStorageService:
                     "rel": rel,
                     "path": rel,
                     "name": path.name,
-                    "date": "-".join(rel.split("/")[:3]),
+                    "date": _catalog_date(rel, path if stored_local else None),
                     "size": len(image_data),
                     "created_at": _now_iso(),
                     "storage": "both" if stored_local and stored_webdav else ("webdav" if stored_webdav else "local"),
@@ -617,6 +668,7 @@ class ImageStorageService:
                     "remote_url": remote_url,
                     "generation": self._new_generation(),
                     "_content_sha256": hashlib.sha256(image_data).hexdigest(),
+                    "local_only": bool(local_only),
                 }
                 if dimensions:
                     item.update({"width": dimensions[0], "height": dimensions[1]})
@@ -626,7 +678,15 @@ class ImageStorageService:
                     self._save_index(items)
                 return StoredImage(
                     rel=rel,
-                    url=self._public_url(rel, base_url),
+                    url=self._public_url(
+                        rel,
+                        base_url,
+                        prefer_app_base=self._prefer_app_delivery_url(
+                            local=stored_local,
+                            webdav=stored_webdav,
+                            local_only=local_only,
+                        ),
+                    ),
                     storage=str(item["storage"]),
                     size=len(image_data),
                 )
@@ -935,7 +995,7 @@ class ImageStorageService:
                         "rel": rel,
                         "path": rel,
                         "name": path.name,
-                        "date": "-".join(rel.split("/")[:3]) if len(rel.split("/")) >= 4 else _mtime_date(path),
+                        "date": _catalog_date(rel, path),
                         "size": path.stat().st_size,
                         "created_at": _mtime_datetime(path),
                         "storage": "local",
@@ -1011,7 +1071,15 @@ class ImageStorageService:
                     **item,
                     "rel": rel,
                     "path": rel,
-                    "url": self._public_url(rel, base_url),
+                    "url": self._public_url(
+                        rel,
+                        base_url,
+                        prefer_app_base=self._prefer_app_delivery_url(
+                            local=bool(item.get("local")),
+                            webdav=bool(item.get("webdav")),
+                            local_only=bool(item.get("local_only")),
+                        ),
+                    ),
                 })
             if changed:
                 self._save_index(indexed)
@@ -1322,12 +1390,7 @@ class ImageStorageService:
                             "path": rel,
                             "name": path.name,
                             "date": str(
-                                current.get("date")
-                                or (
-                                    "-".join(rel.split("/")[:3])
-                                    if len(rel.split("/")) >= 4
-                                    else _mtime_date(path)
-                                )
+                                current.get("date") or _catalog_date(rel, path)
                             ),
                             "size": int(update["size"]),
                             "created_at": str(current.get("created_at") or _mtime_datetime(path)),

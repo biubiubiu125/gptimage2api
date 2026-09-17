@@ -49,6 +49,13 @@ def _sqlite_database_url(path: Path) -> str:
     return f"sqlite:///{database_path.as_posix()}"
 
 
+def _is_sqlite_url(value: str) -> bool:
+    try:
+        return make_url(value).get_backend_name() == "sqlite"
+    except Exception:
+        return False
+
+
 def resolve_database_url(data_dir: Path = DEFAULT_DATA_DIR) -> str:
     configured = env_value("DATABASE_URL", "CHATGPT2API_DATABASE_URL")
     if configured:
@@ -62,7 +69,10 @@ def resolve_database_url(data_dir: Path = DEFAULT_DATA_DIR) -> str:
                 return "postgresql+psycopg2://" + configured.removeprefix("postgres://")
             if configured.startswith("postgresql://"):
                 return "postgresql+psycopg2://" + configured.removeprefix("postgresql://")
-        return configured
+            return configured
+        if _is_sqlite_url(configured):
+            return configured
+        raise ValueError("application database must be PostgreSQL")
 
     local_url = build_postgres_url_from_env(APP_DATABASE_NAME)
     if local_url:

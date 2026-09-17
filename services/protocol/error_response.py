@@ -4,6 +4,8 @@ from typing import Any
 
 from fastapi.responses import JSONResponse
 
+MODELS_UNAVAILABLE_PUBLIC_MESSAGE = "Failed to load models. Please try again."
+
 
 def _message_from_value(value: object) -> str:
     if isinstance(value, str):

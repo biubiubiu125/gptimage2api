@@ -215,14 +215,13 @@ def _public_health_component(value: object, *, fallback_error: str) -> dict[str,
         return {"status": "unhealthy", "healthy": False, "error": fallback_error}
 
     result: dict[str, object] = {}
-    for key in ("status", "healthy", "backend", "database_url", "account_count", "auth_key_count"):
+    for key in ("status", "healthy", "backend", "account_count", "auth_key_count"):
         if key in value:
             result[key] = value[key]
-    error = str(value.get("error") or "").strip()
-    if error:
-        result["error"] = sanitize_diagnostic_text(error, limit=500)
     result.setdefault("status", "unhealthy")
     result.setdefault("healthy", result.get("status") == "healthy")
+    if result.get("healthy") is not True:
+        result["error"] = fallback_error
     return result
 
 

@@ -247,6 +247,22 @@ class SettingsPatch(_SettingsEditableFields):
             raise ValueError("revision must not be blank")
         return normalized
 
+    @field_validator("base_url")
+    @classmethod
+    def normalize_base_url(cls, value: str) -> str:
+        text = str(value or "").strip().rstrip("/")
+        if not text:
+            return ""
+        from services.returned_url_verifier import (
+            ReturnedUrlVerificationError,
+            validate_public_image_base_url,
+        )
+
+        try:
+            return validate_public_image_base_url(text, require_public_host=False)
+        except ReturnedUrlVerificationError as exc:
+            raise ValueError("公开访问地址必须是有效的 HTTP(S) 地址，路径只能为空或 /images") from exc
+
 
 class SettingsView(_StrictModel):
     schema_version: int = Field(ge=1)
