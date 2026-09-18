@@ -22,7 +22,7 @@ from curl_cffi import requests
 from services.browser_fingerprint import CHROME146_IMPERSONATE, CHROME146_USER_AGENT, chrome146_headers
 from services.config import DATA_DIR
 from services.file_lock import file_lock
-from services.http_target import build_http_target_request_options
+from services.http_target import http_target_session_request
 from services.json_file import read_json_file, write_json_file
 from services.proxy_service import proxy_settings
 from services.register.log_redaction import redact_register_log_text
@@ -835,16 +835,17 @@ class YydsMailProvider(BaseMailProvider):
     def _request(self, method: str, path: str, token: str = "", params: dict | None = None, payload: dict | None = None, expected: tuple[int, ...] = (200, 201, 204)):
         headers = {"Authorization": f"Bearer {token}"} if token else {"X-API-Key": self.api_key}
         url = f"{self.api_base}{path}"
-        resp = self.session.request(
-            method.upper(),
-            url,
-            headers=headers,
-            params=params,
-            json=payload,
-            timeout=self._request_timeout(),
-            verify=not proxy_settings.should_skip_ssl_verify(),
-            **build_http_target_request_options(url),
-        )
+        with http_target_session_request(self.session, url) as request_options:
+            resp = self.session.request(
+                method.upper(),
+                url,
+                headers=headers,
+                params=params,
+                json=payload,
+                timeout=self._request_timeout(),
+                verify=not proxy_settings.should_skip_ssl_verify(),
+                **request_options,
+            )
         if resp.status_code not in expected:
             raise RuntimeError(f"YYDSMail 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
         if resp.status_code == 204:
@@ -974,16 +975,17 @@ def _icloud_api_request(
             "Content-Type": "application/json",
             **(headers or {}),
         }, include_defaults=False)
-        resp = session.request(
-            method.upper(),
-            url,
-            headers=request_headers,
-            params=params,
-            json=payload,
-            timeout=timeout,
-            verify=not proxy_settings.should_skip_ssl_verify(),
-            **build_http_target_request_options(url),
-        )
+        with http_target_session_request(session, url) as request_options:
+            resp = session.request(
+                method.upper(),
+                url,
+                headers=request_headers,
+                params=params,
+                json=payload,
+                timeout=timeout,
+                verify=not proxy_settings.should_skip_ssl_verify(),
+                **request_options,
+            )
     except requests.exceptions.RequestException as exc:
         safe_url = redact_register_log_text(url)
         raise RuntimeError(f"iCloud Privacy Mail 请求失败: {method.upper()} {safe_url}, {exc}") from exc
@@ -1261,14 +1263,16 @@ class ICloudApiProvider(BaseMailProvider):
         if code_boundary is not None:
             params["after"] = code_boundary.isoformat()
         try:
-            resp = self.session.request(
-                "GET",
-                code_url,
-                headers=self._headers(),
-                params=params,
-                timeout=self._request_timeout(),
-                verify=not proxy_settings.should_skip_ssl_verify(),
-            )
+            with http_target_session_request(self.session, code_url) as request_options:
+                resp = self.session.request(
+                    "GET",
+                    code_url,
+                    headers=self._headers(),
+                    params=params,
+                    timeout=self._request_timeout(),
+                    verify=not proxy_settings.should_skip_ssl_verify(),
+                    **request_options,
+                )
         except requests.exceptions.RequestException as exc:
             if _icloud_finalize_retryable_error(exc):
                 return None
@@ -1522,16 +1526,17 @@ class ReMailProvider(BaseMailProvider):
         for attempt in range(max_attempts):
             try:
                 url = f"{self.api_base}{path}"
-                resp = self.session.request(
-                    method.upper(),
-                    url,
-                    headers=headers or self._headers(),
-                    params=params,
-                    json=payload,
-                    timeout=self._request_timeout(),
-                    verify=not proxy_settings.should_skip_ssl_verify(),
-                    **build_http_target_request_options(url),
-                )
+                with http_target_session_request(self.session, url) as request_options:
+                    resp = self.session.request(
+                        method.upper(),
+                        url,
+                        headers=headers or self._headers(),
+                        params=params,
+                        json=payload,
+                        timeout=self._request_timeout(),
+                        verify=not proxy_settings.should_skip_ssl_verify(),
+                        **request_options,
+                    )
             except AssertionError:
                 raise
             except _MailWaitDeadlineExceeded:
@@ -2148,17 +2153,18 @@ class OutlookTokenProvider(BaseMailProvider):
         last_detail = ""
         last_status = 0
         for attempt in range(max_attempts):
-            resp = self.session.post(
-                OUTLOOK_TOKEN_URL,
-                data={"client_id": client_id, "grant_type": "refresh_token", "refresh_token": refresh_token, "scope": scope},
-                headers=chrome146_headers({
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "User-Agent": self.conf["user_agent"],
-                }, include_defaults=False),
-                timeout=self._request_timeout(),
-                verify=not proxy_settings.should_skip_ssl_verify(),
-                **build_http_target_request_options(OUTLOOK_TOKEN_URL),
-            )
+            with http_target_session_request(self.session, OUTLOOK_TOKEN_URL) as request_options:
+                resp = self.session.post(
+                    OUTLOOK_TOKEN_URL,
+                    data={"client_id": client_id, "grant_type": "refresh_token", "refresh_token": refresh_token, "scope": scope},
+                    headers=chrome146_headers({
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "User-Agent": self.conf["user_agent"],
+                    }, include_defaults=False),
+                    timeout=self._request_timeout(),
+                    verify=not proxy_settings.should_skip_ssl_verify(),
+                    **request_options,
+                )
             try:
                 data = resp.json()
             except Exception:
@@ -2218,18 +2224,19 @@ class OutlookTokenProvider(BaseMailProvider):
         }
 
     def _read_graph(self, access_token: str) -> list[dict[str, Any]]:
-        resp = self.session.get(
-            OUTLOOK_GRAPH_MESSAGES_URL,
-            headers=chrome146_headers({
-                "Authorization": f"Bearer {access_token}",
-                "Accept": "application/json",
-                "User-Agent": self.conf["user_agent"],
-            }, include_defaults=False),
-            params={"$top": self.message_limit, "$orderby": "receivedDateTime desc", "$select": "subject,receivedDateTime,from,toRecipients,ccRecipients,body,bodyPreview"},
-            timeout=self._request_timeout(),
-            verify=not proxy_settings.should_skip_ssl_verify(),
-            **build_http_target_request_options(OUTLOOK_GRAPH_MESSAGES_URL),
-        )
+        with http_target_session_request(self.session, OUTLOOK_GRAPH_MESSAGES_URL) as request_options:
+            resp = self.session.get(
+                OUTLOOK_GRAPH_MESSAGES_URL,
+                headers=chrome146_headers({
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/json",
+                    "User-Agent": self.conf["user_agent"],
+                }, include_defaults=False),
+                params={"$top": self.message_limit, "$orderby": "receivedDateTime desc", "$select": "subject,receivedDateTime,from,toRecipients,ccRecipients,body,bodyPreview"},
+                timeout=self._request_timeout(),
+                verify=not proxy_settings.should_skip_ssl_verify(),
+                **request_options,
+            )
         try:
             data = resp.json()
         except Exception:

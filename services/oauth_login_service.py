@@ -31,7 +31,7 @@ from services.openai_oauth import (
     platform_oauth_client_id,
     platform_oauth_redirect_uri,
 )
-from services.http_target import build_http_target_request_options
+from services.http_target import http_target_session_request
 from services.proxy_service import proxy_settings
 from utils.diagnostics import sanitize_diagnostic_text
 
@@ -198,29 +198,29 @@ class OAuthLoginService:
             impersonate=CHROME146_IMPERSONATE,
             verify=not proxy_settings.should_skip_ssl_verify(),
         )
+        token_url = f"{auth_base}/api/accounts/oauth/token"
         session = requests.Session(**kwargs)
         try:
-            response = session.post(
-                f"{auth_base}/api/accounts/oauth/token",
-                headers={
-                    **common_headers,
-                    "referer": f"{platform_base}/",
-                    "origin": platform_base,
-                    "auth0-client": platform_auth0_client,
-                    "sec-fetch-site": "same-site",
-                },
-                json={
-                    "client_id": platform_oauth_client_id,
-                    "code_verifier": code_verifier,
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": redirect_uri,
-                },
-                timeout=60,
-                **build_http_target_request_options(
-                    f"{auth_base}/api/accounts/oauth/token",
-                ),
-            )
+            with http_target_session_request(session, token_url) as request_options:
+                response = session.post(
+                    token_url,
+                    headers={
+                        **common_headers,
+                        "referer": f"{platform_base}/",
+                        "origin": platform_base,
+                        "auth0-client": platform_auth0_client,
+                        "sec-fetch-site": "same-site",
+                    },
+                    json={
+                        "client_id": platform_oauth_client_id,
+                        "code_verifier": code_verifier,
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "redirect_uri": redirect_uri,
+                    },
+                    timeout=60,
+                    **request_options,
+                )
         except Exception as exc:
             raise OAuthLoginError(f"换 token 网络异常: {exc}") from exc
         finally:

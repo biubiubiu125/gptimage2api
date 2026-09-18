@@ -21,7 +21,7 @@ from services.config import DATA_DIR, config
 from services.browser_fingerprint import chrome146_headers
 from services.image_failure import ImageFailureError, image_failure
 from services.image_url import build_public_image_url
-from services.http_target import build_http_target_request_options
+from services.http_target import http_target_session_request
 from services.proxy_service import proxy_settings
 from services.json_file import read_json_object, write_json_file
 from services.storage.file_lock import interprocess_lock
@@ -216,14 +216,15 @@ class WebDAVClient:
         return {"auth": (self.username, self.password)} if self.username or self.password else {}
 
     def _request(self, method: str, url: str, **kwargs):
-        response = self.session.request(
-            method,
-            url,
-            timeout=30,
-            **self._auth_kwargs(),
-            **build_http_target_request_options(url),
-            **kwargs,
-        )
+        with http_target_session_request(self.session, url) as request_options:
+            response = self.session.request(
+                method,
+                url,
+                timeout=30,
+                **self._auth_kwargs(),
+                **request_options,
+                **kwargs,
+            )
         if response.status_code >= 400 and not (method == "MKCOL" and response.status_code in {405}):
             raise ImageStorageError(f"WebDAV {method} failed: HTTP {response.status_code}")
         return response
@@ -254,13 +255,14 @@ class WebDAVClient:
             if not item:
                 continue
             current = f"{current}/{quote(item, safe='')}"
-            response = self.session.request(
-                "MKCOL",
-                current,
-                timeout=30,
-                **self._auth_kwargs(),
-                **build_http_target_request_options(current),
-            )
+            with http_target_session_request(self.session, current) as request_options:
+                response = self.session.request(
+                    "MKCOL",
+                    current,
+                    timeout=30,
+                    **self._auth_kwargs(),
+                    **request_options,
+                )
             if response.status_code in {201, 405}:
                 continue
             if response.status_code >= 400:
@@ -278,13 +280,14 @@ class WebDAVClient:
 
     def delete(self, rel: str) -> bool:
         url = self.remote_url(rel)
-        response = self.session.request(
-            "DELETE",
-            url,
-            timeout=30,
-            **self._auth_kwargs(),
-            **build_http_target_request_options(url),
-        )
+        with http_target_session_request(self.session, url) as request_options:
+            response = self.session.request(
+                "DELETE",
+                url,
+                timeout=30,
+                **self._auth_kwargs(),
+                **request_options,
+            )
         if response.status_code in {200, 202, 204, 404}:
             return True
         raise ImageStorageError(f"WebDAV DELETE failed: HTTP {response.status_code}")

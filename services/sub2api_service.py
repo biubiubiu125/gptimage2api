@@ -27,7 +27,7 @@ from services.account_processing import (
 )
 from services.browser_fingerprint import chrome146_headers
 from services.config import config
-from services.http_target import build_http_target_request_options
+from services.http_target import http_target_session_request
 from services.proxy_service import proxy_settings
 from services.remote_import_job_status import import_job_is_active
 from services.storage.remote_import_configuration_repository import (
@@ -347,16 +347,17 @@ def _login(base_url: str, email: str, password: str) -> tuple[str, float]:
     session = None
     try:
         session = _new_http_session()
-        response = session.post(
-            url,
-            json={"email": email, "password": password},
-            headers=chrome146_headers({
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            }, include_defaults=False),
-            timeout=30,
-            **build_http_target_request_options(url),
-        )
+        with http_target_session_request(session, url) as request_options:
+            response = session.post(
+                url,
+                json={"email": email, "password": password},
+                headers=chrome146_headers({
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                }, include_defaults=False),
+                timeout=30,
+                **request_options,
+            )
         if not response.ok:
             error = _normalize_import_error(
                 f"sub2api login failed: HTTP {response.status_code} {response.text[:200]}",
@@ -611,13 +612,14 @@ def list_remote_accounts(server: dict) -> list[dict]:
                 params["group"] = group_id
                 params["group_id"] = group_id
             url = f"{base_url.rstrip('/')}/api/v1/admin/accounts"
-            response = session.get(
-                url,
-                headers=headers,
-                params=params,
-                timeout=30,
-                **build_http_target_request_options(url),
-            )
+            with http_target_session_request(session, url) as request_options:
+                response = session.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=30,
+                    **request_options,
+                )
             if not response.ok:
                 raise RuntimeError(f"sub2api list failed: HTTP {response.status_code} {response.text[:200]}")
             payload = response.json()
@@ -681,16 +683,17 @@ def list_remote_groups(server: dict) -> list[dict]:
         page = 1
         while True:
             url = f"{base_url.rstrip('/')}/api/v1/admin/groups"
-            response = session.get(
-                url,
-                headers=headers,
-                params={
-                    "page": page,
-                    "page_size": 200,
-                },
-                timeout=30,
-                **build_http_target_request_options(url),
-            )
+            with http_target_session_request(session, url) as request_options:
+                response = session.get(
+                    url,
+                    headers=headers,
+                    params={
+                        "page": page,
+                        "page_size": 200,
+                    },
+                    timeout=30,
+                    **request_options,
+                )
             if not response.ok:
                 raise RuntimeError(f"sub2api groups failed: HTTP {response.status_code} {response.text[:200]}")
             payload = response.json()
@@ -775,13 +778,14 @@ def _fetch_access_token_from_export(server: dict, account_id: str) -> tuple[str,
     session = _new_http_session()
     try:
         url = f"{base_url.rstrip('/')}/api/v1/admin/accounts/data"
-        response = session.get(
-            url,
-            headers=headers,
-            params={"ids": account_id, "include_proxies": "false"},
-            timeout=30,
-            **build_http_target_request_options(url),
-        )
+        with http_target_session_request(session, url) as request_options:
+            response = session.get(
+                url,
+                headers=headers,
+                params={"ids": account_id, "include_proxies": "false"},
+                timeout=30,
+                **request_options,
+            )
         if not response.ok:
             raise RuntimeError(f"data export HTTP {response.status_code}")
         payload = response.json()
@@ -822,17 +826,18 @@ def _fetch_access_tokens_for_accounts(server: dict, account_ids: list[str]) -> t
     session = _new_http_session()
     try:
         url = f"{base_url.rstrip('/')}/api/v1/admin/accounts/data"
-        response = session.get(
-            url,
-            headers=headers,
-            params={
-                "ids": ",".join(ids),
-                "timezone": "Asia/Shanghai",
-                "include_proxies": "false",
-            },
-            timeout=30,
-            **build_http_target_request_options(url),
-        )
+        with http_target_session_request(session, url) as request_options:
+            response = session.get(
+                url,
+                headers=headers,
+                params={
+                    "ids": ",".join(ids),
+                    "timezone": "Asia/Shanghai",
+                    "include_proxies": "false",
+                },
+                timeout=30,
+                **request_options,
+            )
         if not response.ok:
             raise RuntimeError(f"data export HTTP {response.status_code}")
         payload = response.json()
@@ -889,12 +894,13 @@ def _fetch_access_token_for_account(server: dict, account_id: str) -> tuple[str,
     session = _new_http_session()
     try:
         url = f"{base_url.rstrip('/')}/api/v1/admin/accounts/{account_id}"
-        response = session.get(
-            url,
-            headers=headers,
-            timeout=30,
-            **build_http_target_request_options(url),
-        )
+        with http_target_session_request(session, url) as request_options:
+            response = session.get(
+                url,
+                headers=headers,
+                timeout=30,
+                **request_options,
+            )
         if not response.ok:
             raise RuntimeError(f"HTTP {response.status_code}")
         payload = response.json()

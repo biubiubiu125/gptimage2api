@@ -31,7 +31,7 @@ from services.browser_fingerprint import CHROME146_IMPERSONATE, CHROME146_USER_A
 from services.config import config
 from services.image_account_dispatch import AccountDispatchStats, rank_image_account_tokens
 from services.image_failure import ImageFailure, classify_image_exception, classify_oauth_refresh_error, image_failure
-from services.http_target import build_http_target_request_options
+from services.http_target import http_target_session_request
 from services.log_service import (
     LOG_TYPE_ACCOUNT,
     log_service,
@@ -1401,21 +1401,22 @@ class AccountService:
         session = requests.Session(**proxy_settings.build_session_kwargs(account=account, impersonate=CHROME146_IMPERSONATE, verify=True))
         try:
             with account_processing_slot():
-                response = session.post(
-                    self._OAUTH_TOKEN_URL,
-                    headers=chrome146_headers({
-                        "Accept": "application/json",
-                        "Content-Type": "application/x-www-form-urlencoded",
-                        "User-Agent": self._OAUTH_USER_AGENT,
-                    }, include_defaults=False),
-                    data={
-                        "grant_type": "refresh_token",
-                        "refresh_token": refresh_token,
-                        "client_id": self._OAUTH_CLIENT_ID,
-                    },
-                    timeout=60,
-                    **build_http_target_request_options(self._OAUTH_TOKEN_URL),
-                )
+                with http_target_session_request(session, self._OAUTH_TOKEN_URL) as request_options:
+                    response = session.post(
+                        self._OAUTH_TOKEN_URL,
+                        headers=chrome146_headers({
+                            "Accept": "application/json",
+                            "Content-Type": "application/x-www-form-urlencoded",
+                            "User-Agent": self._OAUTH_USER_AGENT,
+                        }, include_defaults=False),
+                        data={
+                            "grant_type": "refresh_token",
+                            "refresh_token": refresh_token,
+                            "client_id": self._OAUTH_CLIENT_ID,
+                        },
+                        timeout=60,
+                        **request_options,
+                    )
             raw_text = self._safe_response_text(response)
             try:
                 data = response.json() if raw_text else {}

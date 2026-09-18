@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from ipaddress import ip_address
 import socket
+from typing import Any
 from urllib.parse import urlsplit
 
 from curl_cffi import CurlOpt
@@ -76,3 +79,35 @@ def build_http_target_request_options(
         "allow_redirects": bool(allow_redirects),
         "curl_options": {CurlOpt.RESOLVE: resolve} if resolve else {},
     }
+
+
+@contextmanager
+def http_target_session_request(
+    session: Any,
+    url: object,
+    *,
+    allow_redirects: bool = False,
+) -> Iterator[dict[str, object]]:
+    """Pin DNS on a curl_cffi Session without passing curl_options to request()."""
+
+    options = build_http_target_request_options(url, allow_redirects=allow_redirects)
+    curl_options = options.get("curl_options") if isinstance(options.get("curl_options"), dict) else {}
+    resolve = curl_options.get(CurlOpt.RESOLVE) if isinstance(curl_options, dict) else None
+
+    session_curl_options = getattr(session, "curl_options", None)
+    if not isinstance(session_curl_options, dict):
+        session_curl_options = {}
+        session.curl_options = session_curl_options
+
+    had_resolve = CurlOpt.RESOLVE in session_curl_options
+    previous_resolve = session_curl_options.get(CurlOpt.RESOLVE)
+    if resolve:
+        session_curl_options[CurlOpt.RESOLVE] = resolve
+    try:
+        yield {"allow_redirects": options["allow_redirects"]}
+    finally:
+        if resolve:
+            if had_resolve:
+                session_curl_options[CurlOpt.RESOLVE] = previous_resolve
+            else:
+                session_curl_options.pop(CurlOpt.RESOLVE, None)

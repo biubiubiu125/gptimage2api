@@ -36,7 +36,7 @@ from services.browser_fingerprint import (
 )
 from services.config import config
 from services.editable_file_failure import EditableFileFailureError
-from services.http_target import build_http_target_request_options
+from services.http_target import http_target_session_request
 from services.image_failure import (
     ImageDownloadError,
     ImageFailure,
@@ -1411,20 +1411,21 @@ class OpenAIBackendAPI:
         )
         ensure_ok(response, path)
         upload_meta = response.json()
-        response = self.session.put(
-            upload_meta["upload_url"],
-            headers=self._signed_asset_headers({
-                "Content-Type": mime_type,
-                "x-ms-blob-type": "BlockBlob",
-                "x-ms-version": "2020-04-08",
-                "User-Agent": self.user_agent,
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": CHROME146_ACCEPT_LANGUAGE,
-            }),
-            data=data,
-            timeout=self._deadline_timeout(120),
-            **build_http_target_request_options(upload_meta["upload_url"]),
-        )
+        with http_target_session_request(self.session, upload_meta["upload_url"]) as request_options:
+            response = self.session.put(
+                upload_meta["upload_url"],
+                headers=self._signed_asset_headers({
+                    "Content-Type": mime_type,
+                    "x-ms-blob-type": "BlockBlob",
+                    "x-ms-version": "2020-04-08",
+                    "User-Agent": self.user_agent,
+                    "Accept": "application/json, text/plain, */*",
+                    "Accept-Language": CHROME146_ACCEPT_LANGUAGE,
+                }),
+                data=data,
+                timeout=self._deadline_timeout(120),
+                **request_options,
+            )
         ensure_ok(response, "image_upload", credential_scope="signed_asset")
         path = f"/backend-api/files/{upload_meta['file_id']}/uploaded"
         response = self.session.post(
@@ -1816,20 +1817,21 @@ class OpenAIBackendAPI:
         file_id = str(payload.get("file_id") or "")
         if not upload_url or not file_id:
             raise RuntimeError(f"invalid upload response: {payload}")
-        response = self.session.put(
-            upload_url,
-            headers=self._signed_asset_headers({
-                "Content-Type": mime_type,
-                "x-ms-blob-type": "BlockBlob",
-                "x-ms-version": "2020-04-08",
-                "User-Agent": self.user_agent,
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": CHROME146_ACCEPT_LANGUAGE,
-            }),
-            data=data,
-            timeout=self._editable_request_timeout(deadline, 120),
-            **build_http_target_request_options(upload_url),
-        )
+        with http_target_session_request(self.session, upload_url) as request_options:
+            response = self.session.put(
+                upload_url,
+                headers=self._signed_asset_headers({
+                    "Content-Type": mime_type,
+                    "x-ms-blob-type": "BlockBlob",
+                    "x-ms-version": "2020-04-08",
+                    "User-Agent": self.user_agent,
+                    "Accept": "application/json, text/plain, */*",
+                    "Accept-Language": CHROME146_ACCEPT_LANGUAGE,
+                }),
+                data=data,
+                timeout=self._editable_request_timeout(deadline, 120),
+                **request_options,
+            )
         ensure_ok(response, "image_upload", credential_scope="signed_asset")
         path = f"/backend-api/files/{file_id}/uploaded"
         response = self.session.post(
@@ -2179,12 +2181,13 @@ class OpenAIBackendAPI:
             )
         signed_asset_headers = self._signed_asset_headers()
         signed_asset_headers["Accept"] = "*/*"
-        response = self.session.get(
-            download_url,
-            headers=signed_asset_headers,
-            timeout=self._editable_request_timeout(deadline, 300),
-            **build_http_target_request_options(download_url),
-        )
+        with http_target_session_request(self.session, download_url) as request_options:
+            response = self.session.get(
+                download_url,
+                headers=signed_asset_headers,
+                timeout=self._editable_request_timeout(deadline, 300),
+                **request_options,
+            )
         try:
             ensure_ok(response, "artifact_download", credential_scope="signed_asset")
         except UpstreamHTTPError as exc:

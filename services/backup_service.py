@@ -25,7 +25,7 @@ from sqlalchemy import make_url
 from services.application_database import database_backend_name, dispose_all_database_engines
 from services.browser_fingerprint import chrome146_headers
 from services.config import DATA_DIR, DEFAULT_PROXY_RUNTIME_USER_AGENT, config
-from services.http_target import build_http_target_request_options
+from services.http_target import http_target_session_request
 from services.image_storage_service import IMAGE_INDEX_FILE, WebDAVClient, normalize_image_relative_path
 from services.image_tags_service import TAGS_FILE
 from services.proxy_service import proxy_settings
@@ -262,14 +262,15 @@ class CloudflareR2Client:
         url = f"{self.endpoint}{object_path}"
         if encoded_query:
             url += f"?{encoded_query}"
-        response = self.session.request(
-            method.upper(),
-            url,
-            headers=headers,
-            data=body,
-            timeout=timeout,
-            **build_http_target_request_options(url),
-        )
+        with http_target_session_request(self.session, url) as request_options:
+            response = self.session.request(
+                method.upper(),
+                url,
+                headers=headers,
+                data=body,
+                timeout=timeout,
+                **request_options,
+            )
         return response
 
     def test_connection(self) -> dict[str, object]:

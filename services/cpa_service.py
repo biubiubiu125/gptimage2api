@@ -22,7 +22,7 @@ from services.account_processing import (
     account_processing_worker_count,
 )
 from services.browser_fingerprint import chrome146_headers
-from services.http_target import build_http_target_request_options
+from services.http_target import http_target_session_request
 from services.proxy_service import proxy_settings
 from services.remote_import_job_status import import_job_is_active
 from services.storage.remote_import_configuration_repository import (
@@ -208,12 +208,13 @@ def list_remote_files(pool: dict) -> list[dict]:
             {"proxy": session_kwargs.get("proxy")},
         )
         session = Session(**session_kwargs)
-        response = session.get(
-            url,
-            headers=_management_headers(secret_key),
-            timeout=30,
-            **build_http_target_request_options(url),
-        )
+        with http_target_session_request(session, url) as request_options:
+            response = session.get(
+                url,
+                headers=_management_headers(secret_key),
+                timeout=30,
+                **request_options,
+            )
         if not response.ok:
             raise RuntimeError(f"remote list failed: HTTP {response.status_code}")
         payload = response.json()
@@ -261,13 +262,14 @@ def fetch_remote_account_payload(pool: dict, file_name: str) -> tuple[dict | Non
             {"proxy": session_kwargs.get("proxy")},
         )
         session = Session(**session_kwargs)
-        response = session.get(
-            url,
-            headers=_management_headers(secret_key),
-            params={"name": file_name},
-            timeout=30,
-            **build_http_target_request_options(url),
-        )
+        with http_target_session_request(session, url) as request_options:
+            response = session.get(
+                url,
+                headers=_management_headers(secret_key),
+                params={"name": file_name},
+                timeout=30,
+                **request_options,
+            )
         if not response.ok:
             return None, f"HTTP {response.status_code}"
         payload = response.json()

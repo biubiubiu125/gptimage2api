@@ -19,7 +19,7 @@ from services.genbox_push_view import (
     GENBOX_PUSH_TERMINAL_STATUSES,
     genbox_push_state,
 )
-from services.http_target import build_http_target_request_options
+from services.http_target import http_target_session_request
 from services.image_storage_service import image_storage_service, normalize_image_relative_path
 from services.image_url import normalize_url_origin
 from services.proxy_service import proxy_settings
@@ -255,12 +255,13 @@ def push_gallery_image(relative_path: str, *, metadata: Mapping[str, Any] | None
     try:
         try:
             probe_url = f"{str(settings['base_url']).rstrip('/')}/api/sync/push/status"
-            probe = session.get(
-                probe_url,
-                headers=headers,
-                timeout=timeout,
-                **build_http_target_request_options(probe_url),
-            )
+            with http_target_session_request(session, probe_url) as request_options:
+                probe = session.get(
+                    probe_url,
+                    headers=headers,
+                    timeout=timeout,
+                    **request_options,
+                )
             if not 200 <= int(probe.status_code) < 300:
                 raise _error("genbox_unavailable")
             _validate_probe(_json_object(probe), str(settings["source_id"]), len(payload))
@@ -270,14 +271,15 @@ def push_gallery_image(relative_path: str, *, metadata: Mapping[str, Any] | None
                 if value is not None and str(value).strip():
                     data[key] = str(value)
             push_url = f"{str(settings['base_url']).rstrip('/')}/api/sync/push"
-            response = session.post(
-                push_url,
-                headers=headers,
-                files={"image": (Path(rel).name, payload, "application/octet-stream")},
-                data=data,
-                timeout=timeout,
-                **build_http_target_request_options(push_url),
-            )
+            with http_target_session_request(session, push_url) as request_options:
+                response = session.post(
+                    push_url,
+                    headers=headers,
+                    files={"image": (Path(rel).name, payload, "application/octet-stream")},
+                    data=data,
+                    timeout=timeout,
+                    **request_options,
+                )
         except GenBoxPushError:
             raise
         except Exception as exc:
