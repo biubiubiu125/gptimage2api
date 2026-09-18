@@ -184,6 +184,20 @@ def _version_parts(value: object) -> tuple[str, str]:
     return clean or "unknown", f"v{clean}" if clean else "unknown"
 
 
+def _release_has_update_bundle(release: Mapping[str, object]) -> bool:
+    from services.update_service import UPDATE_ARCHIVE_NAME, UPDATE_CHECKSUM_NAME
+
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        return False
+    names = {
+        str(item.get("name") or "").strip()
+        for item in assets
+        if isinstance(item, dict)
+    }
+    return UPDATE_ARCHIVE_NAME in names and UPDATE_CHECKSUM_NAME in names
+
+
 def _release_body_changelog(release: Mapping[str, object], version: str) -> str:
     body = str(release.get("body") or "").strip()
     if not body:
@@ -309,9 +323,15 @@ class UpdateStatusService:
                 raise UpdateCheckError("release or current version is invalid")
             release_url = f"{GITHUB_RELEASES_URL}/tag/{quote(latest_tag, safe='')}"
             if comparison > 0:
-                can_update = runtime_mode == "managed_container"
+                has_bundle = _release_has_update_bundle(release)
+                can_update = runtime_mode == "managed_container" and has_bundle
                 if can_update:
                     status_message = f"发现新版本 {latest_tag}，可以直接更新。"
+                elif runtime_mode == "managed_container":
+                    status_message = (
+                        f"发现新版本 {latest_tag}，但该版本没有可用的在线更新包，"
+                        "请打开发布页手动更新。"
+                    )
                 elif runtime_mode == "immutable_container":
                     status_message = (
                         f"发现新版本 {latest_tag}，当前容器未启用持久化运行目录，"
