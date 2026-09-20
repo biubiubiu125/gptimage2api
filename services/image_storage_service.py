@@ -78,7 +78,7 @@ def _raise_if_save_deadline_elapsed(deadline_monotonic: float | None) -> None:
         and time.monotonic() >= deadline_monotonic
     ):
         raise ImageFailureError(
-            "image request deadline exceeded before asset storage",
+            "保存图片前请求超过截止时间。",
             failure=image_failure("task_interrupted"),
         )
 
@@ -133,10 +133,10 @@ def normalize_image_relative_path(path: str) -> str:
         or bool(windows_path.root)
         or any(ord(char) < 32 for char in value)
     ):
-        raise HTTPException(status_code=404, detail="image not found")
+        raise HTTPException(status_code=404, detail="找不到该图片。")
     parts = value.split("/")
     if any(part in {"", ".", ".."} or ":" in part for part in parts):
-        raise HTTPException(status_code=404, detail="image not found")
+        raise HTTPException(status_code=404, detail="找不到该图片。")
     return PurePosixPath(*parts).as_posix()
 
 
@@ -184,9 +184,9 @@ def image_local_path(relative_path: str, *, require_file: bool = False) -> Path:
     try:
         path.relative_to(root)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail="image not found") from exc
+        raise HTTPException(status_code=404, detail="找不到该图片。") from exc
     if require_file and not path.is_file():
-        raise HTTPException(status_code=404, detail="image not found")
+        raise HTTPException(status_code=404, detail="找不到该图片。")
     return path
 
 
@@ -226,7 +226,7 @@ class WebDAVClient:
                 **kwargs,
             )
         if response.status_code >= 400 and not (method == "MKCOL" and response.status_code in {405}):
-            raise ImageStorageError(f"WebDAV {method} failed: HTTP {response.status_code}")
+            raise ImageStorageError(f"WebDAV {method} 请求失败（HTTP {response.status_code}）。")
         return response
 
     def remote_url(self, rel: str = "") -> str:
@@ -266,7 +266,7 @@ class WebDAVClient:
             if response.status_code in {201, 405}:
                 continue
             if response.status_code >= 400:
-                raise ImageStorageError(f"WebDAV MKCOL failed: HTTP {response.status_code}")
+                raise ImageStorageError(f"WebDAV 创建目录失败（HTTP {response.status_code}）。")
 
     def put(self, rel: str, payload: bytes, content_type: str = "image/png") -> str:
         self.ensure_dirs(rel)
@@ -290,7 +290,7 @@ class WebDAVClient:
             )
         if response.status_code in {200, 202, 204, 404}:
             return True
-        raise ImageStorageError(f"WebDAV DELETE failed: HTTP {response.status_code}")
+        raise ImageStorageError(f"WebDAV 删除失败（HTTP {response.status_code}）。")
 
     def put_atomic(self, rel: str, payload: bytes, content_type: str = "image/png") -> str:
         """Compatibility method used by the durable image queue."""
@@ -608,7 +608,7 @@ class ImageStorageService:
     def save_private_at_path(self, relative_path: str, image_data: bytes) -> StoredImage:
         rel = normalize_image_relative_path(relative_path)
         if not _is_image_rel(rel):
-            raise ImageStorageError("invalid private image queue artifact path")
+            raise ImageStorageError("私有图片队列产物路径无效。")
         path = image_local_path(rel)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(image_data)
@@ -624,7 +624,7 @@ class ImageStorageService:
     ) -> StoredImage:
         rel = normalize_image_relative_path(relative_path)
         if not _is_image_rel(rel):
-            raise ImageStorageError("invalid image artifact path")
+            raise ImageStorageError("图片产物路径无效。")
         path = image_local_path(rel)
         mode = self.mode()
         if mode not in {"local", "webdav", "both"}:
@@ -744,13 +744,13 @@ class ImageStorageService:
     def get_bytes(self, rel: str) -> bytes:
         safe_rel = normalize_image_relative_path(rel)
         if not _is_image_rel(safe_rel) or _is_queue_private_artifact_path(safe_rel):
-            raise HTTPException(status_code=404, detail="image not found")
+            raise HTTPException(status_code=404, detail="找不到该图片。")
         # File paths are not an authorization boundary: only assets registered
         # in the Gallery index may be read through this service.
         with self._index_guard():
             item = self._load_clean_index().get(safe_rel)
         if not isinstance(item, dict):
-            raise HTTPException(status_code=404, detail="image not found")
+            raise HTTPException(status_code=404, detail="找不到该图片。")
         path = image_local_path(safe_rel)
         if bool(item.get("local")) and path.is_file():
             return path.read_bytes()
@@ -760,23 +760,23 @@ class ImageStorageService:
                 return client.get(safe_rel)
             finally:
                 client.session.close()
-        raise HTTPException(status_code=404, detail="image not found")
+        raise HTTPException(status_code=404, detail="找不到该图片。")
 
     def get_remote_bytes(self, rel: str) -> bytes:
         safe_rel = normalize_image_relative_path(rel)
         if _is_queue_private_artifact_path(safe_rel):
-            raise HTTPException(status_code=404, detail="image not found")
+            raise HTTPException(status_code=404, detail="找不到该图片。")
         with self._index_guard():
             item = self._load_clean_index().get(safe_rel)
         if not isinstance(item, dict) or not item.get("webdav"):
-            raise HTTPException(status_code=404, detail="image not found")
+            raise HTTPException(status_code=404, detail="找不到该图片。")
         with _webdav_client(self.settings()) as client:
             return client.get(safe_rel)
 
     def get_artifact_bytes(self, rel: str) -> bytes:
         safe_rel = normalize_image_relative_path(rel)
         if _is_queue_private_artifact_path(safe_rel):
-            raise HTTPException(status_code=404, detail="image not found")
+            raise HTTPException(status_code=404, detail="找不到该图片。")
         # Local files are not an authorization boundary: only Gallery-indexed
         # public assets may be read through this compatibility helper.
         return self.get_bytes(safe_rel)
@@ -787,12 +787,12 @@ class ImageStorageService:
     def record_genbox_push(self, rel: str, *, status: str, sha256: str, updated_at: str) -> dict[str, str]:
         safe_rel = normalize_image_relative_path(rel)
         if not _is_image_rel(safe_rel):
-            raise HTTPException(status_code=404, detail="image not found")
+            raise HTTPException(status_code=404, detail="找不到该图片。")
         with self._item_guard(safe_rel), self._index_guard():
             items = self._load_clean_index()
             item = items.get(safe_rel)
             if item is None:
-                raise HTTPException(status_code=404, detail="image not found")
+                raise HTTPException(status_code=404, detail="找不到该图片。")
             item["genbox_push"] = {
                 "status": status,
                 "sha256": sha256,
@@ -1170,7 +1170,7 @@ class ImageStorageService:
                             removed=removed,
                             retry_remote=True,
                         ),
-                        ImageStorageError("WebDAV client is unavailable"),
+                        ImageStorageError("WebDAV 客户端不可用。"),
                     )
                 try:
                     removed = client.delete(rel) or removed

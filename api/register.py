@@ -10,7 +10,6 @@ from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 
 from api.support import require_admin
-from services.register.log_redaction import redact_register_snapshot
 from services.register_service import register_service
 from utils.diagnostics import sanitize_diagnostic_text
 from utils.log import logger
@@ -19,7 +18,7 @@ from utils.log import logger
 _REGISTER_STORAGE_ERRORS = (SQLAlchemyError, OSError)
 _REGISTER_STORAGE_ERROR_DETAIL = {
     "error": "register_storage_unavailable",
-    "message": "registration storage is temporarily unavailable",
+    "message": "注册存储暂时不可用。",
 }
 
 
@@ -27,7 +26,7 @@ def _register_storage_http_exception(exc: Exception) -> HTTPException:
     logger.error({
         "event": "register_storage_unavailable",
         "error_type": exc.__class__.__name__,
-        "error": sanitize_diagnostic_text(exc, limit=500),
+        "error": sanitize_diagnostic_text(exc),
     })
     return HTTPException(
         status_code=503,
@@ -39,7 +38,7 @@ def _register_storage_stream_payload(exc: Exception) -> dict[str, object]:
     logger.error({
         "event": "register_storage_stream_unavailable",
         "error_type": exc.__class__.__name__,
-        "error": sanitize_diagnostic_text(exc, limit=500),
+        "error": sanitize_diagnostic_text(exc),
     })
     return {
         "error": {
@@ -181,7 +180,6 @@ def create_router() -> APIRouter:
                     yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
                     yield "data: [DONE]\n\n"
                     return
-                snapshot = redact_register_snapshot(snapshot)
                 payload = json.dumps(snapshot, ensure_ascii=False)
                 if payload != last:
                     last = payload

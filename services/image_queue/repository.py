@@ -15,7 +15,16 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from services.image_account_dispatch import AccountDispatchStats, rank_image_account_candidates
-from services.image_failure import image_failure, should_switch_image_account
+from services.image_failure import (
+    IDEMPOTENCY_CONFLICT_PUBLIC_MESSAGE,
+    IMAGE_QUEUE_RESTORE_REQUIRES_EMPTY_DATABASE_PUBLIC_MESSAGE,
+    TASK_ACK_REQUIRES_COMPLETED_PUBLIC_MESSAGE,
+    TASK_RESULT_NO_LONGER_AVAILABLE_PUBLIC_MESSAGE,
+    TASK_STATE_CONFLICT_PUBLIC_MESSAGE,
+    image_failure,
+    public_http_chinese_error,
+    should_switch_image_account,
+)
 from services.image_queue.database import ImageQueueDatabase, ImageQueueUnavailableError
 from services.image_queue.models import (
     ImageAccountLease,
@@ -79,11 +88,44 @@ class IdempotencyConflict(ValueError):
         self.failure = image_failure(
             self.code,
             raw_detail=message,
-        ).with_public_detail(message)
+        ).with_public_detail(IDEMPOTENCY_CONFLICT_PUBLIC_MESSAGE)
+
+    @property
+    def public_message(self) -> str:
+        return public_http_chinese_error(
+            stage="幂等冲突",
+            reason=IDEMPOTENCY_CONFLICT_PUBLIC_MESSAGE,
+        )
 
 
 class TaskStateConflict(ValueError):
     code = "task_state_conflict"
+
+    _PUBLIC_BY_ORIGINAL = {
+        "only successful or partial completed image results can be acknowledged": (
+            TASK_ACK_REQUIRES_COMPLETED_PUBLIC_MESSAGE
+        ),
+        "deliverable image result is no longer available": (
+            TASK_RESULT_NO_LONGER_AVAILABLE_PUBLIC_MESSAGE
+        ),
+        "image queue restore requires an empty database": (
+            IMAGE_QUEUE_RESTORE_REQUIRES_EMPTY_DATABASE_PUBLIC_MESSAGE
+        ),
+    }
+
+    def __init__(self, message: str = "", *, public_message: str = "") -> None:
+        super().__init__(message)
+        resolved = str(public_message or "").strip()
+        if not resolved:
+            resolved = self._PUBLIC_BY_ORIGINAL.get(
+                str(message),
+                TASK_STATE_CONFLICT_PUBLIC_MESSAGE,
+            )
+        self._public_message = resolved
+
+    @property
+    def public_message(self) -> str:
+        return public_http_chinese_error(stage="任务状态", reason=self._public_message)
 
 
 @dataclass(frozen=True, eq=False)
@@ -1802,7 +1844,7 @@ class ImageQueueRepository:
                         job.status = JobStatus.FAILED.value
                         job.stage = JobStage.FAILED.value
                         job.error_code = "worker_local_recovery_unavailable"
-                        job.error_message = "local recovery artifact belongs to another worker"
+                        job.error_message = "本地恢复产物属于其他工作进程。"
                         job.completed_at = claim_time
                         job.updated_at = claim_time
                         self._event(
@@ -1863,7 +1905,7 @@ class ImageQueueRepository:
                             job.status = JobStatus.FAILED.value
                             job.stage = JobStage.FAILED.value
                             job.error_code = "recovery_account_unavailable"
-                            job.error_message = "original account for remote image recovery is unavailable"
+                            job.error_message = "远程图片恢复所需的原账号已不可用。"
                             job.completed_at = claim_time
                             job.updated_at = claim_time
                             self._event(
@@ -2166,7 +2208,7 @@ class ImageQueueRepository:
             return True
 
     def record_quota_accounting_failure(self, job_id: UUID, error: object) -> int:
-        message = str(error or "quota accounting could not be completed").strip()[:1000]
+        message = str(error or "额度记账未能完成。").strip()
         with self.database.session() as session:
             job = session.execute(
                 select(ImageJob).where(ImageJob.id == job_id).with_for_update()
@@ -2683,7 +2725,7 @@ class ImageQueueRepository:
                 to_status=job.status,
                 data={
                     "recovery_stage": recovery_stage.value,
-                    "error": str(error_message or "final artifact is not deliverable")[:500],
+                    "error": str(error_message or "最终图片产物不可交付。"),
                 },
             )
             self._aggregate_task(session, task)
@@ -2775,7 +2817,7 @@ class ImageQueueRepository:
                 to_status=job.status,
                 data={
                     "error_code": error_code,
-                    "error_message": error_message[:1000],
+                    "error_message": error_message,
                     "artifact_paths": [item.relative_path for item in invalidated],
                 },
             )
@@ -2944,7 +2986,7 @@ class ImageQueueRepository:
                 event_type="job_failed",
                 from_status=previous_status,
                 to_status=job.status,
-                data={"error_code": error_code, "error_message": error_message[:1000]},
+                data={"error_code": error_code, "error_message": error_message},
             )
             if task is None:
                 return None
@@ -3001,7 +3043,7 @@ class ImageQueueRepository:
                 attempt=job.generate_attempts + job.download_attempts + job.save_attempts,
                 from_status=previous_status,
                 to_status=job.status,
-                data={"error_code": error_code, "error_message": error_message[:1000]},
+                data={"error_code": error_code, "error_message": error_message},
             )
             if task is None:
                 return None
@@ -3502,19 +3544,19 @@ class ImageQueueRepository:
         elif has_failed and all_terminal:
             task.status = TaskStatus.FAILED.value
             task.error_code = str((failed.error_code if failed is not None else None) or "image_job_failed")
-            task.error_message = str((failed.error_message if failed is not None else None) or "image job failed")
+            task.error_message = str((failed.error_message if failed is not None else None) or "图片任务失败。")
             task.completed_at = now
         elif all_terminal:
             task.status = TaskStatus.FAILED.value
             task.error_code = task.error_code or "image_job_failed"
-            task.error_message = task.error_message or "image job failed"
+            task.error_message = task.error_message or "图片任务失败。"
             task.completed_at = now
         elif task.cancel_requested:
             task.completed_at = None
             apply_active_status("canceling")
         elif has_failed:
             task.error_code = str((failed.error_code if failed is not None else None) or "image_job_failed")
-            task.error_message = str((failed.error_message if failed is not None else None) or "image job failed")
+            task.error_message = str((failed.error_message if failed is not None else None) or "图片任务失败。")
             task.completed_at = None
             apply_active_status("sibling_jobs_running")
         else:

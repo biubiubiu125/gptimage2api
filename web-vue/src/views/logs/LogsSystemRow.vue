@@ -105,8 +105,7 @@
         </div>
         <p
           v-if="diagnostics"
-          class="mt-1.5 truncate text-[11px] text-muted-foreground"
-          :title="diagnostics"
+          class="mt-1.5 whitespace-pre-wrap break-all text-[11px] text-muted-foreground"
         >
           {{ diagnostics }}
         </p>

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import imaplib
 import random
 import re
+import socket
 import string
 import time
 import uuid
@@ -14,7 +16,7 @@ from email.header import decode_header, make_header
 from email.utils import getaddresses, parsedate_to_datetime
 from threading import Lock
 from typing import Any, Callable, TypeVar
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import quote, unquote, urljoin, urlsplit
 
 from curl_cffi import requests
 
@@ -310,7 +312,7 @@ class ReMailHttpError(RuntimeError):
         self.detail = str(detail or "")
         message = f"Remail request failed: {self.method} {self.path}, HTTP {self.status_code}"
         if self.detail:
-            message = f"{message}, body={self.detail[:300]}"
+            message = f"{message}, body={self.detail}"
         super().__init__(message)
 
 
@@ -325,7 +327,7 @@ def _remail_text(text: object, *sensitive_values: object) -> str:
 
 
 def _sanitize_remail_dead_reason(reason: object, _mailbox: dict[str, Any] | None = None) -> str:
-    return _remail_text(reason).strip()[:300]
+    return _remail_text(reason).strip()
 
 
 def _load_remail_dead_mailboxes() -> list[dict[str, Any]]:
@@ -502,9 +504,152 @@ def _normalize_string_list(value: Any) -> list[str]:
     return [text] if text else []
 
 
+def _mail_session_proxy(*sources: Any) -> str:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in ("proxy", "_icloud_proxy"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    return "direct"
+
+
+def _mail_imap_proxy(*sources: Any) -> str:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in ("_register_proxy", "register_proxy"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    return "direct"
+
+
+def _recv_exact(sock: socket.socket, size: int) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < size:
+        chunk = sock.recv(size - len(chunks))
+        if not chunk:
+            raise RuntimeError("IMAP 代理连接已关闭。")
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
+def _open_proxied_tcp_socket(host: str, port: int, timeout: float, proxy: str) -> socket.socket:
+    target_host = str(host or "").strip()
+    target_port = int(port)
+    proxy_url = str(proxy or "").strip()
+    if not proxy_url or proxy_url == "direct":
+        return socket.create_connection((target_host, target_port), timeout=timeout)
+    parsed = urlsplit(proxy_url if "://" in proxy_url else f"http://{proxy_url}")
+    scheme = (parsed.scheme or "http").lower()
+    proxy_host = unquote(parsed.hostname or "")
+    proxy_port = int(parsed.port or (443 if scheme == "https" else 80))
+    username = unquote(parsed.username or "")
+    password = unquote(parsed.password or "")
+    if not proxy_host:
+        raise RuntimeError("IMAP 代理地址无效。")
+    host_bytes = b""
+    if scheme.startswith("socks"):
+        user_bytes = username.encode("utf-8")
+        pass_bytes = password.encode("utf-8")
+        if len(user_bytes) > 255 or len(pass_bytes) > 255:
+            raise RuntimeError("IMAP SOCKS5 用户名或密码过长。")
+        try:
+            host_bytes = target_host.encode("idna")
+        except UnicodeError as exc:
+            raise RuntimeError("IMAP SOCKS5 主机名过长。") from exc
+        if len(host_bytes) > 255:
+            raise RuntimeError("IMAP SOCKS5 主机名过长。")
+    sock = socket.create_connection((proxy_host, proxy_port), timeout=timeout)
+    try:
+        sock.settimeout(timeout)
+        if scheme.startswith("socks"):
+            if username:
+                sock.sendall(b"\x05\x02\x00\x02")
+            else:
+                sock.sendall(b"\x05\x01\x00")
+            greeting = _recv_exact(sock, 2)
+            if greeting[:1] != b"\x05":
+                raise RuntimeError("IMAP SOCKS5 握手失败。")
+            if greeting[1:2] == b"\x02":
+                user_bytes = username.encode("utf-8")
+                pass_bytes = password.encode("utf-8")
+                sock.sendall(
+                    bytes([1, len(user_bytes)])
+                    + user_bytes
+                    + bytes([len(pass_bytes)])
+                    + pass_bytes
+                )
+                auth = _recv_exact(sock, 2)
+                if auth[1:2] != b"\x00":
+                    raise RuntimeError("IMAP SOCKS5 认证失败。")
+            elif greeting[1:2] != b"\x00":
+                raise RuntimeError("IMAP SOCKS5 握手被拒绝。")
+            request = b"\x05\x01\x00\x03" + bytes([len(host_bytes)]) + host_bytes + target_port.to_bytes(2, "big")
+            sock.sendall(request)
+            reply = _recv_exact(sock, 4)
+            if reply[:1] != b"\x05" or reply[1:2] != b"\x00":
+                raise RuntimeError("IMAP SOCKS5 连接失败。")
+            atyp = reply[3]
+            if atyp == 1:
+                _recv_exact(sock, 6)
+            elif atyp == 3:
+                domain_len = _recv_exact(sock, 1)[0]
+                _recv_exact(sock, domain_len + 2)
+            elif atyp == 4:
+                _recv_exact(sock, 18)
+            else:
+                raise RuntimeError("IMAP SOCKS5 地址类型无效。")
+            return sock
+        auth_header = ""
+        if username or password:
+            token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+            auth_header = f"Proxy-Authorization: Basic {token}\r\n"
+        request = (
+            f"CONNECT {target_host}:{target_port} HTTP/1.1\r\n"
+            f"Host: {target_host}:{target_port}\r\n"
+            f"{auth_header}"
+            "\r\n"
+        )
+        sock.sendall(request.encode("ascii"))
+        buffer = bytearray()
+        while True:
+            chunk = sock.recv(1)
+            if not chunk:
+                raise RuntimeError("IMAP HTTP 代理连接已关闭。")
+            buffer.extend(chunk)
+            if buffer.endswith(b"\r\n\r\n"):
+                break
+            if len(buffer) > 65536:
+                raise RuntimeError("IMAP HTTP 代理响应过长。")
+        header = bytes(buffer)
+        status_line = header.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+        parts = status_line.split(" ", 2)
+        if len(parts) < 2 or not parts[1].startswith("2"):
+            raise RuntimeError(f"IMAP HTTP 代理 CONNECT 失败：{status_line}")
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
+
+class _ProxiedIMAP4SSL(imaplib.IMAP4_SSL):
+    def __init__(self, host: str = "", port=imaplib.IMAP4_SSL_PORT, *, timeout=None, proxy: str = ""):
+        self._tcp_proxy = str(proxy or "").strip()
+        super().__init__(host=host, port=port, timeout=timeout)
+
+    def _create_socket(self, timeout):
+        if not self._tcp_proxy or self._tcp_proxy == "direct":
+            return super()._create_socket(timeout)
+        sock = _open_proxied_tcp_socket(self.host, self.port, timeout, self._tcp_proxy)
+        return self.ssl_context.wrap_socket(sock, server_hostname=self.host)
+
+
 def _create_session(conf: dict):
     kwargs = proxy_settings.build_session_kwargs(
-        proxy="direct",
+        proxy=_mail_session_proxy(conf),
         upstream=True,
         impersonate=CHROME146_IMPERSONATE,
         verify=not proxy_settings.should_skip_ssl_verify(),
@@ -847,7 +992,7 @@ class YydsMailProvider(BaseMailProvider):
                 **request_options,
             )
         if resp.status_code not in expected:
-            raise RuntimeError(f"YYDSMail 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
+            raise RuntimeError(f"YYDSMail 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text}")
         if resp.status_code == 204:
             return {}
         data = resp.json()
@@ -946,7 +1091,7 @@ def _icloud_validate_response_url(value: object, api_base: str, *, field_name: s
 
 def _icloud_mailbox_session(mailbox: dict[str, Any]) -> requests.Session:
     kwargs = proxy_settings.build_session_kwargs(
-        proxy="direct",
+        proxy=_mail_session_proxy(mailbox),
         upstream=True,
         impersonate=CHROME146_IMPERSONATE,
         verify=not proxy_settings.should_skip_ssl_verify(),
@@ -990,7 +1135,7 @@ def _icloud_api_request(
         safe_url = redact_register_log_text(url)
         raise RuntimeError(f"iCloud Privacy Mail 请求失败: {method.upper()} {safe_url}, {exc}") from exc
     if resp.status_code not in expected:
-        detail = str(getattr(resp, "text", "") or "")[:300]
+        detail = str(getattr(resp, "text", "") or "")
         safe_url = redact_register_log_text(url)
         raise RuntimeError(f"iCloud Privacy Mail 请求失败: {method.upper()} {safe_url}, HTTP {resp.status_code}, body={detail}")
     if resp.status_code == 204:
@@ -1145,7 +1290,7 @@ class ICloudApiProvider(BaseMailProvider):
         self.purpose = ICLOUD_API_DEFAULT_PURPOSE
         self.keyword = ICLOUD_API_DEFAULT_KEYWORD
         kwargs = proxy_settings.build_session_kwargs(
-            proxy="direct",
+            proxy=_mail_session_proxy(conf),
             upstream=True,
             impersonate=CHROME146_IMPERSONATE,
             verify=not proxy_settings.should_skip_ssl_verify(),
@@ -1475,7 +1620,7 @@ class ReMailProvider(BaseMailProvider):
             data = resp.json()
         except Exception:
             body = self._response_body(resp, *extra_secrets)
-            detail = f": {body[:300]}" if body else ""
+            detail = f": {body}" if body else ""
             raise RuntimeError(f"Remail API returned non-JSON response{detail}")
         if isinstance(data, dict) and (data.get("success") is False or data.get("ok") is False):
             detail = data.get("message") or data.get("error") or data.get("errorMessage") or "Remail API returned failure"
@@ -2175,7 +2320,7 @@ class OutlookTokenProvider(BaseMailProvider):
                     raise OutlookTokenError("OutlookToken 刷新响应缺少 access_token")
                 return access_token
 
-            detail = str(data.get("error_description") or data.get("error") or resp.text[:300])
+            detail = str(data.get("error_description") or data.get("error") or resp.text)
             last_detail = detail
             last_status = int(resp.status_code)
             if _is_outlook_token_rate_limited(last_status, detail) and attempt < max_attempts - 1:
@@ -2242,7 +2387,7 @@ class OutlookTokenProvider(BaseMailProvider):
         except Exception:
             data = {}
         if resp.status_code != 200:
-            detail = data.get("error", {}).get("message") if isinstance(data.get("error"), dict) else resp.text[:300]
+            detail = data.get("error", {}).get("message") if isinstance(data.get("error"), dict) else resp.text
             raise RuntimeError(f"OutlookToken Graph 失败: HTTP {resp.status_code}, {detail}")
         items = data.get("value") if isinstance(data, dict) else None
         return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
@@ -2293,10 +2438,17 @@ class OutlookTokenProvider(BaseMailProvider):
         """返回最近 N 封邮件（Graph 已按 receivedDateTime desc 排序，最新在前）。"""
         return [self._normalize_graph_item(mailbox, item) for item in self._read_graph(access_token)]
 
+    def _open_imap_ssl(self, proxy: str = ""):
+        return _ProxiedIMAP4SSL(
+            self.imap_host,
+            timeout=self._request_timeout(),
+            proxy=proxy,
+        )
+
     def _imap_messages(self, mailbox: dict[str, Any], access_token: str) -> list[dict[str, Any]]:
         """返回最近 N 封邮件，最新在前。"""
         auth_string = f"user={mailbox.get('login_email') or mailbox['address']}\x01auth=Bearer {access_token}\x01\x01"
-        imap = imaplib.IMAP4_SSL(self.imap_host, timeout=self._request_timeout())
+        imap = self._open_imap_ssl(_mail_imap_proxy(self.conf))
         try:
             imap.authenticate("XOAUTH2", lambda _: auth_string.encode("utf-8"))
             status, _ = imap.select("INBOX", readonly=True)
@@ -2548,7 +2700,7 @@ def create_mailbox(mail_config: dict, username: str | None = None) -> dict:
         finally:
             if provider is not None:
                 provider.close()
-    detail = "；".join(errors)[:1200]
+    detail = "；".join(errors)
     raise RuntimeError(detail or "所有启用的邮箱提供商均无法创建邮箱")
 
 
@@ -2612,19 +2764,19 @@ def mark_mailbox_result(mailbox: dict, *, success: bool, error: Exception | str 
         return True
     reason = str(error or "").strip()
     if isinstance(error, OutlookTokenRateLimitError) or "AADSTS90055" in reason or "HTTP 429" in reason or "Microsoft 限流" in reason:
-        _set_outlook_token_state(address, "failed", reason[:300])
+        _set_outlook_token_state(address, "failed", reason)
     elif isinstance(error, OutlookTokenError) or "OutlookToken 刷新失败" in reason or "access_token" in reason:
-        _set_outlook_token_state(address, "token_invalid", reason[:300])
+        _set_outlook_token_state(address, "token_invalid", reason)
         login_email = str(mailbox.get("login_email") or mailbox.get("alias_of") or "").strip()
         if login_email and login_email.lower() != address.lower():
-            _set_outlook_token_state(login_email, "token_invalid", reason[:300])
+            _set_outlook_token_state(login_email, "token_invalid", reason)
     elif "登录流" in reason or "login flow" in reason or "login_required" in reason:
-        _set_outlook_token_state(address, "login_required", reason[:300])
+        _set_outlook_token_state(address, "login_required", reason)
         login_email = str(mailbox.get("login_email") or mailbox.get("alias_of") or "").strip()
         if login_email and login_email.lower() != address.lower():
-            _set_outlook_token_state(login_email, "login_required", reason[:300])
+            _set_outlook_token_state(login_email, "login_required", reason)
     else:
-        _set_outlook_token_state(address, "failed", reason[:300])
+        _set_outlook_token_state(address, "failed", reason)
     return True
 
 
@@ -2664,5 +2816,5 @@ def get_existing_mailbox(mail_config: dict, email: str) -> dict:
         finally:
             if provider is not None:
                 provider.close()
-    detail = "；".join(errors)[:1200]
+    detail = "；".join(errors)
     raise RuntimeError(detail or "所有启用的邮箱提供商均无法查询已有邮箱")

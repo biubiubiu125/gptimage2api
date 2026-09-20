@@ -19,7 +19,11 @@ from services.image_delivery import (
     is_url_only_result,
     url_only_result_matches_base_url,
 )
-from services.image_failure import IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE, image_failure
+from services.image_failure import (
+    IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE,
+    IMAGE_TASK_PENDING_PUBLIC_MESSAGE,
+    image_failure,
+)
 from services.image_task_view import canonical_image_task_status
 from services.image_url import build_public_image_url
 from services.proxy_service import proxy_settings
@@ -77,7 +81,7 @@ def job_conversation_model(context: Mapping[str, object]) -> str:
 def _clean_client_task_id(value: object) -> str:
     client_task_id = _clean(value)
     if len(client_task_id) > MAX_CLIENT_TASK_ID_LENGTH:
-        raise ValueError(f"client_task_id must be at most {MAX_CLIENT_TASK_ID_LENGTH} characters")
+        raise ValueError(f"client_task_id 最长 {MAX_CLIENT_TASK_ID_LENGTH} 个字符。")
     return client_task_id
 
 
@@ -122,6 +126,24 @@ def _safe_task_error_message(error_code: object, error_message: object) -> str:
         RuntimeError(raw_message or code),
         failure,
     )
+
+
+def _call_record_error_fields(error_code: object, error_message: object) -> dict[str, str]:
+    code = _clean(error_code)
+    raw_message = _clean(error_message)
+    if not code and not raw_message:
+        return {}
+    public_error = _safe_task_error_message(code, raw_message)
+    fields: dict[str, str] = {}
+    if code:
+        fields["error_code"] = code
+    if public_error:
+        fields["public_error"] = public_error
+    if raw_message:
+        fields["error"] = raw_message
+        fields["upstream_error"] = raw_message
+        fields["raw_detail"] = raw_message
+    return fields
 
 
 def _recovery_poll_timeout(payload: Mapping[str, Any] | None) -> float:
@@ -334,9 +356,8 @@ class ImageTaskService:
             detail["account_email"] = account_email
         if task.conversation_id:
             detail["conversation_id"] = task.conversation_id
-        if error_code:
-            detail["error_code"] = error_code
-            detail["error"] = _safe_task_error_message(error_code, task.error_message)
+        if error_code or task.error_message:
+            detail.update(_call_record_error_fields(error_code, task.error_message))
         try:
             from services.realtime_monitor_service import realtime_monitor_service
 
@@ -425,7 +446,7 @@ class ImageTaskService:
         public_root = config.images_dir.expanduser().resolve()
         if queue_root != public_root:
             raise ImageQueueConfigurationError(
-                "image queue artifact root must match the public image storage root"
+                "图片队列产物目录必须与公开图片存储根目录一致。"
             )
 
     def _reconcile_user_quota_reservations(self) -> int:
@@ -475,9 +496,9 @@ class ImageTaskService:
 
     def _require_repository(self) -> ImageQueueRepository:
         if self._startup_error is not None:
-            raise ImageQueueUnavailableError("image queue did not start successfully") from self._startup_error
+            raise ImageQueueUnavailableError("图片队列没有成功启动。") from self._startup_error
         if self.repository is None:
-            raise ImageQueueUnavailableError("image queue PostgreSQL is not started")
+            raise ImageQueueUnavailableError("图片队列 PostgreSQL 尚未启动。")
         return self.repository
 
     def _queue_runtime_is_healthy(self) -> bool:
@@ -786,20 +807,20 @@ class ImageTaskService:
             return {
                 "status": "starting",
                 "healthy": False,
-                "error": "image queue is not started",
+                "error": "图片队列尚未启动。",
             }
         if self._started and self.repository is None:
             return {
                 "status": "unavailable",
                 "healthy": False,
-                "error": "image queue repository is not started",
+                "error": "图片队列存储尚未启动。",
             }
         if self._started:
             if self.database is None:
                 return {
                     "status": "unavailable",
                     "healthy": False,
-                    "error": "image queue database is not started",
+                    "error": "图片队列数据库尚未启动。",
                 }
             try:
                 self.database.ping()
@@ -813,7 +834,7 @@ class ImageTaskService:
             return {
                 "status": "unavailable",
                 "healthy": False,
-                "error": "image queue worker is unavailable",
+                "error": "图片队列工作进程暂时不可用。",
             }
         return {"status": "ok", "healthy": True}
 
@@ -843,11 +864,6 @@ class ImageTaskService:
         queued_jobs_ahead = max(0, position - 1)
         estimate_seconds = queued_jobs_ahead * 30
         now = datetime.now(timezone.utc)
-        wait_reason = snapshot.wait_reason or ("queued" if position else "")
-        if snapshot.status == TaskStatus.QUEUED and wait_reason in {"", "queued"}:
-            if worker_pause_reason is None:
-                worker_pause_reason = repository.current_worker_pause_reason()
-            wait_reason = worker_pause_reason or wait_reason
         public_error = _safe_task_error_message(
             snapshot.error_code,
             snapshot.error_message,
@@ -868,7 +884,6 @@ class ImageTaskService:
             "queue_position": position,
             "estimated_wait_seconds": estimate_seconds,
             "estimated_start_at": (now + timedelta(seconds=estimate_seconds)).isoformat() if position else None,
-            "wait_reason": wait_reason,
             "delivery_status": snapshot.delivery_status.value,
             "stage": snapshot.stage,
             "progress": snapshot.progress or snapshot.stage or public_status,
@@ -877,7 +892,7 @@ class ImageTaskService:
             "cancel_requested": bool(snapshot.cancel_requested),
             "data": [_public_result_item(item) for item in snapshot.data],
             "error_code": snapshot.error_code,
-            "error": public_error,
+            "public_error": public_error,
             "created_at": self._iso(snapshot.created_at),
             "updated_at": self._iso(snapshot.updated_at),
         }
@@ -1123,10 +1138,7 @@ class ImageTaskService:
                         snapshot.id,
                         artifact.job_id,
                         error_code="invalid_image_result",
-                        error_message=_safe_task_error_message(
-                            "invalid_image_result",
-                            str(exc),
-                        ),
+                        error_message=str(exc),
                     )
                     if failed is None:
                         raise
@@ -1275,17 +1287,12 @@ class ImageTaskService:
         if not worker_id:
             return
         safe_url = sanitize_delivery_url(returned_url)
-        safe_error = (
-            _safe_task_error_message("image_url_unreachable", error)
-            if error
-            else ""
-        )
         try:
             self._require_repository().record_worker_delivery_status(
                 worker_id,
                 healthy=healthy,
                 url=safe_url,
-                error=safe_error,
+                error=error,
             )
         except Exception as exc:
             logger.warning({
@@ -1444,7 +1451,7 @@ class ImageTaskService:
             snapshot.id,
             artifact.job_id,
             error_code="image_url_unreachable",
-            error_message=_safe_task_error_message("image_url_unreachable", message),
+            error_message=message,
         )
 
     def _result_job_id_for_path(
@@ -1488,7 +1495,7 @@ class ImageTaskService:
             snapshot.id,
             job_id,
             error_code="invalid_image_result",
-            error_message=_safe_task_error_message("invalid_image_result", str(error)),
+            error_message=str(error),
         )
 
     @staticmethod
@@ -2161,7 +2168,7 @@ class ImageTaskService:
             raise ImageQueueUnavailableError("image artifact service is not started")
         context = repository.get_execution_request(claim.job.task_id)
         if context is None:
-            raise ValueError("claimed image task no longer exists")
+            raise ValueError("认领的图片任务已不存在。")
         payload = dict(context["request_payload"])
         account_email = ""
         try:
@@ -2279,7 +2286,7 @@ class ImageTaskService:
                 if result_commit_started:
                     return
                 if repository.is_cancel_requested(claim.job.task_id):
-                    raise RuntimeError("image task was canceled")
+                    raise RuntimeError("图片任务已取消。")
                 if runtime_guard is not None:
                     runtime_guard()
 
@@ -2304,7 +2311,7 @@ class ImageTaskService:
                 assert descriptor is not None
                 ensure_active()
                 if not repository.record_artifact(claim, descriptor):
-                    raise RuntimeError("image job lease was lost while recording an artifact")
+                    raise RuntimeError("记录产物时图片任务租约已丢失。")
                 mark_uncommitted_artifact_committed(descriptor)
                 return descriptor
 
@@ -2335,7 +2342,7 @@ class ImageTaskService:
                     )
                     completed = repository.complete_job(claim, recovered_artifact, recovered_result)
                     if completed is None:
-                        raise RuntimeError("image job lease was lost before recovered result commit")
+                        raise RuntimeError("恢复结果提交前图片任务租约已丢失。")
                     mark_uncommitted_artifact_committed(recovered_artifact)
                     cleanup_conversations(managed_conversation_ids)
                     return
@@ -2347,7 +2354,7 @@ class ImageTaskService:
                 if value.conversation_id:
                     conversation_id = track_conversation(value.conversation_id)
                 if not repository.checkpoint_job(claim, value):
-                    raise RuntimeError("image job lease was lost while checkpointing")
+                    raise RuntimeError("保存进度时图片任务租约已丢失。")
                 if value.conversation_id:
                     checkpointed_conversation_ids.add(track_conversation(value.conversation_id))
 
@@ -2355,9 +2362,9 @@ class ImageTaskService:
                 nonlocal final_artifact, result_payload, conversation_id, result_commit_started
                 ensure_active()
                 if final_artifact is not None:
-                    raise RuntimeError("single image job returned multiple final images")
+                    raise RuntimeError("单次图片任务返回了多张最终图片。")
                 if not repository.mark_quota_consumed(claim):
-                    raise RuntimeError("image job lease was lost while recording quota consumption")
+                    raise RuntimeError("记录额度消耗时图片任务租约已丢失。")
                 result_commit_started = True
                 detail_conversation_id = track_conversation(details.get("conversation_id"))
                 if detail_conversation_id:
@@ -2385,7 +2392,7 @@ class ImageTaskService:
                     upscale_event,
                     dict(getattr(upscale_outcome, "event_data", {}) or {}),
                 ):
-                    raise RuntimeError("image job lease was lost while recording upscale fallback")
+                    raise RuntimeError("记录放大回退时图片任务租约已丢失。")
                 upscaled_artifact = record_stage(
                     final_bytes,
                     "upscaled",
@@ -2432,7 +2439,7 @@ class ImageTaskService:
                     inputs = _composite_mask(inputs, masks)
                 encoded_images = encode_images(inputs)
                 if not encoded_images:
-                    raise ValueError("image edit task has no persisted input artifact")
+                    raise ValueError("图片编辑任务没有已保存的输入图片。")
             outputs: list[Any] = []
             recovered_upscaled = track_recovered_uncommitted_artifact(self._run_in_worker_pool(
                 "io",
@@ -2448,7 +2455,7 @@ class ImageTaskService:
             if recovered_upscaled is not None:
                 ensure_active()
                 if not repository.record_artifact(claim, recovered_upscaled):
-                    raise RuntimeError("image job lease was lost while recovering an upscaled artifact")
+                    raise RuntimeError("恢复放大产物时图片任务租约已丢失。")
                 mark_uncommitted_artifact_committed(recovered_upscaled)
                 source_urls = list(claim.job.image_urls)
                 checkpoint(JobCheckpoint(
@@ -2493,7 +2500,7 @@ class ImageTaskService:
                 ))
                 ensure_active()
                 if recovered_downloaded is not None and not repository.record_artifact(claim, recovered_downloaded):
-                    raise RuntimeError("image job lease was lost while recovering a downloaded artifact")
+                    raise RuntimeError("恢复下载产物时图片任务租约已丢失。")
                 mark_uncommitted_artifact_committed(recovered_downloaded)
 
             checkpoint_urls = list(claim.job.image_urls)
@@ -2506,7 +2513,7 @@ class ImageTaskService:
                 and repository.invalidate_recovery_artifacts(claim) > 0
             ):
                 raise LocalArtifactRecoveryUnavailable(
-                    "local recovery artifacts are unavailable"
+                    "本地恢复产物不可用。"
                 )
 
             def resolve_checkpoint():
@@ -2603,7 +2610,7 @@ class ImageTaskService:
                 pass
             elif checkpoint_urls or recovered_downloaded is not None:
                 if len(downloaded) != 1:
-                    raise RuntimeError("single image job recovery returned an unexpected image count")
+                    raise RuntimeError("单次图片任务恢复返回的图片数量异常。")
                 format_result(downloaded[0], {
                     "conversation_id": claim.job.conversation_id,
                     "image_urls": checkpoint_urls,
@@ -2635,7 +2642,7 @@ class ImageTaskService:
                 ))
             ensure_active()
             if final_artifact is None or result_payload is None:
-                raise RuntimeError("image generation completed without a saved artifact")
+                raise RuntimeError("图片生成完成但没有保存产物。")
             for output in outputs or []:
                 output_conversation_id = track_conversation(getattr(output, "conversation_id", ""))
                 if output_conversation_id:
@@ -2643,7 +2650,7 @@ class ImageTaskService:
             ensure_active()
             completed = repository.complete_job(claim, final_artifact, result_payload)
             if completed is None:
-                raise RuntimeError("image job lease was lost before result commit")
+                raise RuntimeError("提交结果前图片任务租约已丢失。")
             mark_uncommitted_artifact_committed(final_artifact)
             cleanup_conversations(managed_conversation_ids)
 
@@ -2796,13 +2803,13 @@ class ImageTaskService:
         request_started_at: float | None = None,
     ) -> dict[str, Any]:
         if not bool(getattr(self, "_started", False)):
-            raise ImageQueueUnavailableError("image queue is not started")
+            raise ImageQueueUnavailableError("图片队列尚未启动。")
         self._ensure_worker_heartbeat()
         worker = getattr(self, "worker", None)
         if worker is not None:
             fatal = str(getattr(worker, "fatal_error", "") or "").strip()
             if fatal:
-                raise ImageQueueUnavailableError("image queue worker is unavailable")
+                raise ImageQueueUnavailableError("图片队列工作进程暂时不可用。")
             if self._dispatch_runtime_unavailable() and not self.has_active_claims():
                 if not self._restore_in_progress():
                     try:
@@ -2815,18 +2822,18 @@ class ImageTaskService:
                 worker = getattr(self, "worker", None)
                 fatal = str(getattr(worker, "fatal_error", "") or "").strip() if worker is not None else ""
                 if fatal:
-                    raise ImageQueueUnavailableError("image queue worker is unavailable")
+                    raise ImageQueueUnavailableError("图片队列工作进程暂时不可用。")
             if self._dispatch_cannot_accept_new_work():
-                raise ImageQueueUnavailableError("image queue worker is unavailable")
+                raise ImageQueueUnavailableError("图片队列工作进程暂时不可用。")
         repository = self._require_repository()
         public_model = require_public_image_model(model)
         client_id = _clean_client_task_id(client_task_id)
         selected_key = select_idempotency_key({}, idempotency_key or client_id)
         if not selected_key:
-            raise ValueError("idempotency key or client_task_id is required")
+            raise ValueError("必须提供幂等键或 client_task_id。")
         original_prompt = _clean(prompt)
         if not original_prompt:
-            raise ValueError("prompt is required")
+            raise ValueError("必须提供提示词。")
         effective_prompt, suffix_version = build_effective_prompt(original_prompt, self.settings)
         count = _image_count(n)
         legacy_hash_payload = {
@@ -3045,17 +3052,21 @@ class ImageTaskService:
         owner = _owner_key(identity)
         requested = [item for item in (_clean(value) for value in task_ids) if item]
         snapshots = repository.list_tasks(owner, requested or None, limit=limit, offset=offset)
-        snapshots = [
-            self._ensure_deliverable_task(
-                owner,
-                item,
-            )
-            for item in snapshots
-        ]
-        snapshots = [
-            self._mark_response_attempted_for_deliverable_result(owner, item)
-            for item in snapshots
-        ]
+        resolved: list[TaskSnapshot] = []
+        for item in snapshots:
+            try:
+                deliverable = self._ensure_deliverable_task(owner, item)
+                resolved.append(
+                    self._mark_response_attempted_for_deliverable_result(owner, deliverable)
+                )
+            except InvalidImageArtifact as exc:
+                logger.warning({
+                    "event": "image_task_list_delivery_failed",
+                    "task_id": str(item.id),
+                    "error": str(exc),
+                })
+                resolved.append(item)
+        snapshots = resolved
         active_ids = [item.id for item in snapshots if item.status not in TERMINAL_TASK_STATUSES]
         positions, worker_pause_reason = repository.queue_context(active_ids)
         found = (
@@ -3122,14 +3133,18 @@ class ImageTaskService:
         while True:
             task = self._require_repository().get_task(owner_key, task_id)
             if task is None:
-                raise ValueError("image task not found")
+                raise ValueError(IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE)
             if self._is_waitable_terminal(task):
                 task = self._ensure_deliverable_task(owner_key, task, force_url_verification=True)
                 if self._is_waitable_terminal(task):
                     task = self._mark_response_attempted_for_deliverable_result(owner_key, task)
-                    return self._public_snapshot(task)
+                    snapshot = dict(self._public_snapshot(task))
+                    admin_error = str(task.error_message or "").strip()
+                    if admin_error:
+                        snapshot["_admin_error"] = admin_error
+                    return snapshot
             if deadline is not None and time.monotonic() >= deadline:
-                raise TimeoutError("image task is still running")
+                raise TimeoutError(IMAGE_TASK_PENDING_PUBLIC_MESSAGE)
             time.sleep(self.settings.result_wait_poll_seconds)
 
     async def wait_for_terminal_async(
@@ -3152,7 +3167,7 @@ class ImageTaskService:
                 event.clear()
                 task = await asyncio.to_thread(repository.get_task, owner_key, task_id)
                 if task is None:
-                    raise ValueError("image task not found")
+                    raise ValueError(IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE)
                 if self._is_waitable_terminal(task):
                     task = await asyncio.to_thread(
                         self._ensure_deliverable_task,
@@ -3166,10 +3181,14 @@ class ImageTaskService:
                             owner_key,
                             task,
                         )
-                        return self._public_snapshot(task)
+                        snapshot = dict(self._public_snapshot(task))
+                        admin_error = str(task.error_message or "").strip()
+                        if admin_error:
+                            snapshot["_admin_error"] = admin_error
+                        return snapshot
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
-                    raise TimeoutError("image task is still running")
+                    raise TimeoutError(IMAGE_TASK_PENDING_PUBLIC_MESSAGE)
                 fallback_poll = max(1.0, min(5.0, self.settings.result_wait_poll_seconds * 20.0))
                 wait_timeout = fallback_poll if remaining is None else min(fallback_poll, remaining)
                 try:
@@ -3187,7 +3206,7 @@ class ImageTaskService:
     def cancel(self, identity: Mapping[str, object], task_id: object) -> dict[str, Any]:
         task = self._require_repository().request_cancel(_owner_key(identity), task_id)
         if task is None:
-            raise ValueError("image task not found")
+            raise ValueError(IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE)
         self._handle_task_state_change(task.id)
         return self._public_snapshot(task)
 
@@ -3196,21 +3215,21 @@ class ImageTaskService:
         owner = _owner_key(identity)
         current = repository.get_task(owner, task_id)
         if current is None:
-            raise ValueError("image task not found")
+            raise ValueError(IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE)
         current = self._ensure_deliverable_task(
             owner,
             current,
         )
         task = repository.acknowledge(owner, task_id)
         if task is None:
-            raise ValueError("image task not found")
+            raise ValueError(IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE)
         self._handle_task_state_change(task.id)
         return self._public_snapshot(task)
 
     def mark_response_attempted(self, identity: Mapping[str, object], task_id: object) -> dict[str, Any]:
         task = self._require_repository().mark_response_attempted(_owner_key(identity), task_id)
         if task is None:
-            raise ValueError("image task not found")
+            raise ValueError(IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE)
         return self._public_snapshot(task)
 
     def read_result_artifact(
@@ -3221,7 +3240,7 @@ class ImageTaskService:
     ) -> bytes:
         task = self._require_repository().get_task(_owner_key(identity), task_id)
         if task is None:
-            raise ValueError("image task not found")
+            raise ValueError(IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE)
         if self.artifact_service is None:
             raise ImageQueueUnavailableError("image artifact service is not started")
         artifact = next(
@@ -3327,7 +3346,7 @@ class ImageTaskService:
             timeout,
         )
         if task is None:
-            raise ValueError("image task not found")
+            raise ValueError(IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE)
         if self.worker is not None:
             self.worker.notify()
         task = self._mark_response_attempted_for_deliverable_result(_owner_key(identity), task)

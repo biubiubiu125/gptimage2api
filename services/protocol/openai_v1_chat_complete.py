@@ -176,7 +176,7 @@ def chat_messages_from_body(body: dict[str, Any]) -> list[dict[str, Any]]:
         valid: list[dict[str, Any]] = []
         for message in messages:
             if not isinstance(message, dict):
-                raise HTTPException(status_code=400, detail={"error": "messages must include valid role and content"})
+                raise HTTPException(status_code=400, detail={"error": "messages 必须包含有效的角色和内容。"})
             role = str(message.get("role") or "").strip().lower()
             content = message.get("content")
             has_content = (
@@ -185,13 +185,13 @@ def chat_messages_from_body(body: dict[str, Any]) -> list[dict[str, Any]]:
                 or bool(message.get("tool_calls"))
             )
             if role not in {"system", "user", "assistant", "tool", "developer"} or not has_content:
-                raise HTTPException(status_code=400, detail={"error": "messages must include valid role and content"})
+                raise HTTPException(status_code=400, detail={"error": "messages 必须包含有效的角色和内容。"})
             valid.append(message)
         return valid
     prompt = str(body.get("prompt") or "").strip()
     if prompt:
         return [{"role": "user", "content": prompt}]
-    raise HTTPException(status_code=400, detail={"error": "messages or prompt is required"})
+    raise HTTPException(status_code=400, detail={"error": "必须提供 messages 或提示词。"})
 
 
 def chat_image_args(body: dict[str, Any]) -> tuple[str, str, int, list[tuple[bytes, str, str]], str | None]:
@@ -209,7 +209,7 @@ def chat_image_args(body: dict[str, Any]) -> tuple[str, str, int, list[tuple[byt
     model = str(body.get("model") or "gpt-image-2").strip() or "gpt-image-2"
     prompt = extract_chat_prompt(body)
     if not prompt:
-        raise HTTPException(status_code=400, detail={"error": "prompt is required"})
+        raise HTTPException(status_code=400, detail={"error": "必须提供提示词。"})
     images = [
         (data, f"image_{idx}.png", mime)
         for idx, (data, mime) in enumerate(extract_chat_image(body), start=1)
@@ -329,7 +329,7 @@ def chat_completion_annotations(annotations: list[dict[str, Any]]) -> list[dict[
 def web_search_chat_response(messages: list[dict[str, Any]], model: str) -> dict[str, Any]:
     query = search_query_from_messages(messages)
     if not query:
-        raise HTTPException(status_code=400, detail={"error": "messages or prompt is required for web search"})
+        raise HTTPException(status_code=400, detail={"error": "联网搜索必须提供 messages 或提示词。"})
     result = run_web_search(query)
     text, annotations = text_with_url_citations(result)
     return _with_log_metadata(
@@ -346,7 +346,7 @@ def web_search_chat_response(messages: list[dict[str, Any]], model: str) -> dict
 def stream_web_search_chat_completion(messages: list[dict[str, Any]], model: str) -> Iterator[dict[str, Any]]:
     query = search_query_from_messages(messages)
     if not query:
-        raise HTTPException(status_code=400, detail={"error": "messages or prompt is required for web search"})
+        raise HTTPException(status_code=400, detail={"error": "联网搜索必须提供 messages 或提示词。"})
     result = run_web_search(query)
     text, _annotations = text_with_url_citations(result)
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
@@ -407,10 +407,10 @@ def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
         from services.image_failure import ImageGenerationError, image_failure
 
         raise ImageGenerationError(
-            "durable image task context is required",
+            "图片生成必须走持久化图片队列。",
             failure=image_failure(
                 "durable_context_required",
-                raw_detail="chat image requests must enter the PostgreSQL durable queue",
+                raw_detail="对话生图必须进入 PostgreSQL 持久化图片队列。",
             ),
         )
     payload, mode, response_format = durable_image_request(body)
@@ -448,10 +448,10 @@ def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         from services.image_failure import ImageGenerationError, image_failure
 
         raise ImageGenerationError(
-            "durable image task context is required",
+            "图片生成必须走持久化图片队列。",
             failure=image_failure(
                 "durable_context_required",
-                raw_detail="chat image requests must enter the PostgreSQL durable queue",
+                raw_detail="对话生图必须进入 PostgreSQL 持久化图片队列。",
             ),
         )
     payload, mode, response_format = durable_image_request(body)
@@ -544,11 +544,11 @@ def _validate_text_choice_count(body: dict[str, Any]) -> None:
     try:
         count = int(value)
     except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail={"error": "n must be an integer"}) from exc
+        raise HTTPException(status_code=400, detail={"error": "生成数量必须是整数。"}) from exc
     if count != 1:
         raise HTTPException(
             status_code=400,
-            detail={"error": "n must be 1 for text chat completions"},
+            detail={"error": "文本对话的生成数量必须是 1。"},
         )
 
 

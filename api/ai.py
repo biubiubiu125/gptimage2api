@@ -8,14 +8,23 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.image_inputs import image_edit_source_request_hash, parse_image_edit_request, read_image_source_groups
-from api.image_tasks import _IMAGE_QUEUE_ERRORS, _image_queue_http_exception
+from api.image_tasks import (
+    _IMAGE_QUEUE_ERRORS,
+    _image_queue_http_exception,
+    _public_value_error_http_exception,
+)
 from api.support import allowlisted_trace_headers, require_identity, resolve_api_base_url, resolve_image_base_url
 from services.content_filter import check_request, request_shape, request_text
-from services.editable_file_task_service import EditableFileTaskConflict, editable_file_task_service
+from services.editable_file_failure import public_editable_exception_message
+from services.editable_file_task_service import (
+    EditableFileTaskConflict,
+    EditableFileTaskNotFoundError,
+    editable_file_task_service,
+)
 from services.image_queue.idempotency import ensure_idempotency_key, select_idempotency_key
 from services.image_queue.repository import IdempotencyConflict
 from services.image_task_service import image_task_service
-from services.log_service import LoggedCall
+from services.log_service import LoggedCall, _log_http_exception
 from services.protocol import (
     anthropic_v1_messages,
     openai_v1_chat_complete,
@@ -25,6 +34,12 @@ from services.protocol import (
     openai_v1_response,
     openai_search,
     durable_image,
+)
+from services.image_failure import (
+    EDITABLE_IDEMPOTENCY_KEY_REQUIRED_PUBLIC_MESSAGE,
+    EDITABLE_QUOTA_COMMIT_FAILED_PUBLIC_MESSAGE,
+    QUOTA_COMMIT_FAILED_PUBLIC_MESSAGE,
+    public_http_chinese_error,
 )
 from services.protocol.error_response import MODELS_UNAVAILABLE_PUBLIC_MESSAGE
 from services.quota_service import image_quota_units_from_request, reserve_quota
@@ -101,7 +116,7 @@ def attach_trace_headers(call: LoggedCall, request: Request) -> None:
     for header, field in TRACE_REQUEST_HEADERS.items():
         value = str(request.headers.get(header) or "").strip()
         if value:
-            headers[field] = value[:160]
+            headers[field] = value
     if headers:
         existing = call.trace_metadata.get("request_headers")
         if isinstance(existing, dict):
@@ -121,7 +136,7 @@ def attach_image_task_context(
             str(payload.get("client_task_id") or ""),
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        raise _public_value_error_http_exception(exc) from exc
     payload["_image_task_context"] = {
         "identity": dict(identity),
         "idempotency_key": idempotency_key,
@@ -139,6 +154,28 @@ def attach_image_task_context(
     request.state.gptimage2api_idempotency_key_generated = generated
 
 
+def _public_editable_error_http_exception(exc: Exception) -> HTTPException:
+    message = public_http_chinese_error(
+        stage="可编辑文件",
+        reason=public_editable_exception_message(exc),
+    )
+    code = str(getattr(exc, "code", "") or "").strip()
+    if isinstance(exc, EditableFileTaskNotFoundError):
+        return HTTPException(
+            status_code=404,
+            detail={"error": code or "editable_file_task_not_found", "message": message},
+        )
+    if isinstance(exc, EditableFileTaskConflict):
+        return HTTPException(
+            status_code=409,
+            detail={"error": code or "editable_file_conflict", "message": message},
+        )
+    return HTTPException(
+        status_code=400,
+        detail={"error": code or "bad_request", "message": message},
+    )
+
+
 def require_editable_task_id(body: EditableFileTaskRequest, request: Request) -> str:
     try:
         client_task_id = select_idempotency_key(
@@ -146,15 +183,15 @@ def require_editable_task_id(body: EditableFileTaskRequest, request: Request) ->
             str(body.client_task_id or ""),
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        raise _public_editable_error_http_exception(exc) from exc
     if not client_task_id:
         raise HTTPException(
             status_code=400,
             detail={
                 "error": "idempotency_key_required",
-                "message": (
-                    "editable file tasks require Idempotency-Key, X-NewAPI-Request-Id, "
-                    "X-OneAPI-Request-Id, or client_task_id"
+                "message": public_http_chinese_error(
+                    stage="请求参数",
+                    reason=EDITABLE_IDEMPOTENCY_KEY_REQUIRED_PUBLIC_MESSAGE,
                 ),
             },
         )
@@ -169,14 +206,31 @@ def _models_unavailable_http_exception(exc: Exception) -> HTTPException:
     })
     return HTTPException(
         status_code=502,
-        detail={"error": MODELS_UNAVAILABLE_PUBLIC_MESSAGE},
+        detail={
+            "error": public_http_chinese_error(
+                stage="模型列表",
+                reason=MODELS_UNAVAILABLE_PUBLIC_MESSAGE,
+            )
+        },
     )
 
 
 def require_non_empty_text(value: object, field_name: str) -> str:
     text = str(value or "").strip()
     if not text:
-        raise HTTPException(status_code=400, detail={"error": f"{field_name} is required"})
+        labels = {
+            "prompt": "提示词",
+        }
+        label = labels.get(field_name, field_name)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": public_http_chinese_error(
+                    stage="请求参数",
+                    reason=f"必须提供{label}。",
+                )
+            },
+        )
     return text
 
 
@@ -184,7 +238,7 @@ async def filter_or_log(call: LoggedCall, text: str) -> None:
     try:
         await run_in_threadpool(check_request, text)
     except HTTPException as exc:
-        call.log("调用失败", status="failed", error=str(exc.detail))
+        _log_http_exception(call, exc)
         raise
 
 
@@ -207,9 +261,9 @@ def _commit_editable_quota_or_raise(quota, result: object, idempotency_key: str)
             detail={
                 "error": {
                     "code": "quota_commit_failed",
-                    "message": (
-                        "editable file task was created but quota state could not be committed; "
-                        "poll the task_id or retry with the same client_task_id"
+                    "message": public_http_chinese_error(
+                        stage="额度提交",
+                        reason=EDITABLE_QUOTA_COMMIT_FAILED_PUBLIC_MESSAGE,
                     ),
                     "task_id": _editable_task_id_from_result(result),
                     "idempotency_key": str(idempotency_key or ""),
@@ -231,9 +285,9 @@ def _commit_protocol_quota_or_raise(quota, payload: dict[str, object]) -> None:
             detail={
                 "error": {
                     "code": "quota_commit_failed",
-                    "message": (
-                        "image task was created but quota state could not be committed; "
-                        "poll the task_id or retry with the same idempotency key"
+                    "message": public_http_chinese_error(
+                        stage="额度提交",
+                        reason=QUOTA_COMMIT_FAILED_PUBLIC_MESSAGE,
                     ),
                     "task_id": task_id,
                     "idempotency_key": idempotency_key,
@@ -274,10 +328,10 @@ async def _run_image_protocol_call(
 ):
     context = payload.get("_image_task_context")
     if not isinstance(context, dict):
-        raise HTTPException(status_code=500, detail={"error": "image task context is required"})
+        raise HTTPException(status_code=500, detail={"error": "必须提供图片任务上下文。"})
     identity = context.get("identity")
     if not isinstance(identity, dict):
-        raise HTTPException(status_code=500, detail={"error": "image task identity is required"})
+        raise HTTPException(status_code=500, detail={"error": "必须提供图片任务标识。"})
     context["source_endpoint"] = endpoint
     request_started_at = getattr(call, "started", None)
     if request_started_at is not None:
@@ -340,7 +394,7 @@ async def _attach_existing_protocol_submission(
     except IdempotencyConflict as exc:
         raise HTTPException(
             status_code=409,
-            detail={"error": exc.code, "message": str(exc)},
+            detail={"error": exc.code, "message": exc.public_message},
         ) from exc
     if existing_submission is None:
         return False
@@ -583,7 +637,7 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         kind = (body.kind or "ppt").strip().lower()
         if kind not in {"ppt", "psd"}:
-            raise HTTPException(status_code=400, detail={"error": "kind must be ppt or psd"})
+            raise HTTPException(status_code=400, detail={"error": "类型必须是 ppt 或 psd。"})
         client_task_id = require_editable_task_id(body, request)
         endpoint = f"/v1/{kind}/generations"
         call = LoggedCall(identity, endpoint, "gpt-5-5-thinking", f"{kind.upper()} generation task", request_text=body.prompt)
@@ -605,15 +659,12 @@ def create_router() -> APIRouter:
                 base64_images=body.base64_images,
                 base_url=resolve_api_base_url(request),
             )
-        except EditableFileTaskConflict as exc:
+        except (EditableFileTaskConflict, ValueError, RuntimeError) as exc:
             quota.cancel()
-            raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
+            raise _public_editable_error_http_exception(exc) from exc
         except _IMAGE_QUEUE_ERRORS as exc:
             quota.cancel()
             raise _image_queue_http_exception(exc) from exc
-        except ValueError as exc:
-            quota.cancel()
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         except Exception:
             quota.cancel()
             raise
@@ -628,7 +679,7 @@ def create_router() -> APIRouter:
         try:
             path = await run_in_threadpool(editable_file_task_service.file_path_for_identity, identity, file_path)
         except Exception as exc:
-            raise HTTPException(status_code=404, detail={"error": "file not found"}) from exc
+            raise HTTPException(status_code=404, detail={"error": "找不到该文件。"}) from exc
         return FileResponse(path, filename=path.name)
 
     @router.post("/v1/ppt/generations")
@@ -653,15 +704,12 @@ def create_router() -> APIRouter:
                 base64_images=body.base64_images,
                 base_url=resolve_api_base_url(request),
             )
-        except EditableFileTaskConflict as exc:
+        except (EditableFileTaskConflict, ValueError, RuntimeError) as exc:
             quota.cancel()
-            raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
+            raise _public_editable_error_http_exception(exc) from exc
         except _IMAGE_QUEUE_ERRORS as exc:
             quota.cancel()
             raise _image_queue_http_exception(exc) from exc
-        except ValueError as exc:
-            quota.cancel()
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         except Exception:
             quota.cancel()
             raise
@@ -691,15 +739,12 @@ def create_router() -> APIRouter:
                 base64_images=body.base64_images,
                 base_url=resolve_api_base_url(request),
             )
-        except EditableFileTaskConflict as exc:
+        except (EditableFileTaskConflict, ValueError, RuntimeError) as exc:
             quota.cancel()
-            raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
+            raise _public_editable_error_http_exception(exc) from exc
         except _IMAGE_QUEUE_ERRORS as exc:
             quota.cancel()
             raise _image_queue_http_exception(exc) from exc
-        except ValueError as exc:
-            quota.cancel()
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         except Exception:
             quota.cancel()
             raise

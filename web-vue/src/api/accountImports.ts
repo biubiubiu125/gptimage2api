@@ -60,6 +60,7 @@ export interface CPAPool {
   id: string
   name: string
   base_url: string
+  secret_key?: string
   import_job?: CPAImportJob | null
 }
 
@@ -73,6 +74,8 @@ export interface Sub2APIServer {
   name: string
   base_url: string
   email: string
+  password?: string
+  api_key?: string
   has_api_key: boolean
   group_id: string
   import_job?: CPAImportJob | null

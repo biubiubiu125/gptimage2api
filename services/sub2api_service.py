@@ -953,13 +953,13 @@ class Sub2APIImportService:
     ) -> dict:
         ids = list(dict.fromkeys(_clean(item) for item in account_ids if _clean(item)))
         if not ids:
-            raise ValueError("account ids is required")
+            raise ValueError("请选择要导入的账号。")
 
         server_id = _clean(server.get("id"))
         import_job = self._job(server_id, server, len(ids))
         saved_job = import_job.reserve()
         if saved_job is None:
-            raise ValueError("server not found")
+            raise ValueError("找不到该服务器。")
         try:
             account_group_ids = (
                 {}
@@ -969,7 +969,7 @@ class Sub2APIImportService:
         except Exception as exc:
             import_job.fail(
                 name="local account groups",
-                error=str(exc) or "account group mapping failed",
+                error=str(exc) or "账号分组映射失败。",
             )
             raise
 

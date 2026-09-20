@@ -30,7 +30,7 @@ from utils.log import logger
 
 T = TypeVar("T")
 
-CLAIM_MAX_RUNTIME_MESSAGE = "image job claim exceeded maximum runtime"
+CLAIM_MAX_RUNTIME_MESSAGE = "图片任务占用超过最长运行时间。"
 
 
 def compute_remaining_account_slots(
@@ -488,7 +488,7 @@ class ImageWorkerManager:
         exc: Exception,
         initial_stage: JobStage,
     ) -> None:
-        self._recent_error = str(exc)[:300]
+        self._recent_error = str(exc)
         if (
             self.repository.is_cancel_requested(claim.job.task_id)
             and not bool(getattr(current_job or claim.job, "quota_consumed", False))
@@ -631,7 +631,7 @@ class ImageWorkerManager:
             process.join(min(0.2, remaining))
         self._drain_claim_stage_updates(claim, stage_receiver)
         if process.is_alive():
-            self._recent_error = "image job claim exceeded maximum runtime"
+            self._recent_error = CLAIM_MAX_RUNTIME_MESSAGE
             logger.error({
                 "event": "image_worker_claim_max_runtime_exceeded",
                 "worker_id": self.worker_id,
@@ -698,7 +698,7 @@ class ImageWorkerManager:
             claims[job_id] = claim
 
     def _set_fatal_error(self, exc: Exception) -> None:
-        message = str(exc or "fatal image worker error")[:300]
+        message = str(exc or "图片队列 worker 发生致命错误。")
         with self._lock:
             self._fatal_error = message
             self._recent_error = message
@@ -788,12 +788,12 @@ class ImageWorkerManager:
             self._stop.set()
             heartbeat.join(timeout=max(1.0, float(self.settings.heartbeat_seconds)))
             if heartbeat.is_alive():
-                raise RuntimeError("image worker cannot restart while heartbeat is still running")
+                raise RuntimeError("心跳仍在运行，无法重启图片队列。")
         with self._lock:
             active = [future for future in self._futures if not future.done()]
             stranded = getattr(self, "_stranded_claims", None) or {}
             if active or stranded:
-                raise RuntimeError("image worker cannot restart while claims are still active")
+                raise RuntimeError("认领任务仍在进行，无法重启图片队列。")
             self._futures.clear()
             self._stranded_claims.clear()
             self._claim_stages.clear()
@@ -1076,7 +1076,7 @@ class ImageWorkerManager:
                 try:
                     self.repository.heartbeat_claims(self.worker_id, claims)
                 except Exception as exc:
-                    self._recent_error = str(exc)[:300]
+                    self._recent_error = str(exc)
                     logger.error({
                         "event": "image_worker_heartbeat_failed",
                         "worker_id": self.worker_id,
@@ -1114,7 +1114,7 @@ class ImageWorkerManager:
                 pause_reason=pause_reason,
             )
         except Exception as exc:
-            self._recent_error = str(exc)[:300]
+            self._recent_error = str(exc)
             if self._is_worker_identity_conflict(exc):
                 self._set_fatal_error(exc)
                 logger.error({
@@ -1139,7 +1139,7 @@ class ImageWorkerManager:
                 self._dispatch_once()
                 backoff_seconds = max(1.0, float(self.settings.poll_interval_seconds))
             except Exception as exc:
-                self._recent_error = str(exc)[:300]
+                self._recent_error = str(exc)
                 if self._is_worker_identity_conflict(exc):
                     self._set_fatal_error(exc)
                     logger.error({
@@ -1271,7 +1271,7 @@ class ImageWorkerManager:
         try:
             account_stats = dict(self.account_service.get_stats())
         except Exception as exc:
-            self._recent_error = str(exc)[:300]
+            self._recent_error = str(exc)
         snapshot_data = asdict(snapshot)
         snapshot_data["sampled_at"] = snapshot.sampled_at.isoformat()
         snapshot_data["node_role"] = "standalone"
@@ -1409,7 +1409,7 @@ class ImageWorkerManager:
                     expected_process_instance_id=self.process_instance_id,
                 )
             except Exception as exc:
-                self._recent_error = str(exc)[:300]
+                self._recent_error = str(exc)
                 if self._is_worker_identity_conflict(exc):
                     self._set_fatal_error(exc)
                     logger.error({

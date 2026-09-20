@@ -323,13 +323,13 @@ class CPAImportService:
     ) -> dict:
         names = list(dict.fromkeys(str(name or "").strip() for name in selected_files if str(name or "").strip()))
         if not names:
-            raise ValueError("selected files is required")
+            raise ValueError("请选择要导入的文件。")
 
         pool_id = str(pool.get("id") or "").strip()
         import_job = self._job(pool_id, pool, len(names))
         saved_job = import_job.reserve()
         if saved_job is None:
-            raise ValueError("pool not found")
+            raise ValueError("找不到该号池。")
         import_job.start_worker(
             target=self._run_import_guarded,
             args=(pool_id, pool, names, import_job.job_id, target_group_id),

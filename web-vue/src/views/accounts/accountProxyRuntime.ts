@@ -59,9 +59,6 @@ export function useAccountProxyRuntime(options: AccountProxyRuntimeOptions) {
   function syncProxyControlsFromProjection(projection?: AccountProxyProjection) {
     const mode = projection?.proxy_mode || 'inherit'
     const raw = String(projection?.proxy || '').trim()
-    // Detail responses already populate the editable draft with the real proxy
-    // value. Keep that value when the list projection only contains a safe
-    // placeholder for custom proxy credentials.
     if (!String(options.proxyValue.value || '').trim() && raw) {
       options.proxyValue.value = raw
     }

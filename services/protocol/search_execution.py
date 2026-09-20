@@ -34,7 +34,7 @@ def _schedule_auth_verification(
         logger.warning({
             "event": "auth_verification_schedule_failed",
             "source": event,
-            "error": repr(schedule_error)[:300],
+            "error": repr(schedule_error),
         })
 
 
@@ -63,7 +63,7 @@ def execute_search(
         try:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError("web search timed out")
+                raise TimeoutError("网页搜索超时。")
             with backend_factory(access_token) as backend:
                 result = backend.search(query, timeout_secs=remaining)
         except Exception as exc:

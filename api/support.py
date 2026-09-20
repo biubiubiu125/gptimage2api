@@ -19,6 +19,7 @@ IMAGE_TRACE_HEADERS = (
     "x-oneapi-request-id",
     "x-channel-id",
     "x-channel-name",
+    "call_id",
 )
 
 
@@ -30,7 +31,7 @@ def allowlisted_trace_headers(headers: object) -> dict[str, str]:
     for name in IMAGE_TRACE_HEADERS:
         value = str(getter(name) or "").strip()
         if value:
-            result[name] = value[:160]
+            result[name] = value
     return result
 
 
@@ -82,7 +83,7 @@ def require_identity(authorization: str | None) -> dict[str, object]:
             status_code=503,
             detail={
                 "error": "auth_storage_unavailable",
-                "message": "authentication storage is temporarily unavailable",
+                "message": "认证存储暂时不可用，请稍后重试。",
             },
         ) from exc
     if identity is None:
@@ -137,10 +138,7 @@ def resolve_image_base_url(request: Request) -> str:
         status_code=400,
         detail={
             "error": "base_url_required",
-            "message": (
-                "GPTIMAGE2API_BASE_URL is required "
-                "for public image delivery"
-            ),
+            "message": "公开图片交付需要配置 GPTIMAGE2API_BASE_URL。",
         },
     )
 
@@ -156,7 +154,7 @@ def resolve_api_base_url(request: Request) -> str:
         status_code=400,
         detail={
             "error": "base_url_required",
-            "message": "GPTIMAGE2API_BASE_URL is required for non-public API hosts",
+            "message": "当前访问地址不是本机，需要配置 GPTIMAGE2API_BASE_URL。",
         },
     )
 
@@ -164,7 +162,7 @@ def resolve_api_base_url(request: Request) -> str:
 def sanitize_cpa_pool(pool: dict | None) -> dict | None:
     if not isinstance(pool, dict):
         return None
-    return {key: value for key, value in pool.items() if key != "secret_key"}
+    return dict(pool)
 
 
 def sanitize_cpa_pools(pools: list[dict]) -> list[dict]:
@@ -174,7 +172,7 @@ def sanitize_cpa_pools(pools: list[dict]) -> list[dict]:
 def sanitize_sub2api_server(server: dict | None) -> dict | None:
     if not isinstance(server, dict):
         return None
-    sanitized = {key: value for key, value in server.items() if key not in {"password", "api_key"}}
+    sanitized = dict(server)
     sanitized["has_api_key"] = bool(str(server.get("api_key") or "").strip())
     return sanitized
 

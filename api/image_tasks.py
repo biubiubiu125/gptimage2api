@@ -32,14 +32,24 @@ from services.image_queue.resource_controller import (
     ImageQueueStorageFullError,
 )
 from services.image_failure import (
+    IMAGE_INPUT_INVALID_PUBLIC_MESSAGE,
     IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE,
     IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE,
+    IMAGE_TASK_PENDING_PUBLIC_MESSAGE,
+    QUOTA_COMMIT_FAILED_PUBLIC_MESSAGE,
+    ImageGenerationError,
     image_failure,
     image_queue_http_message,
+    public_http_chinese_error,
     public_image_error_message,
 )
+from services.protocol.error_response import VALIDATION_ERROR_PUBLIC_MESSAGE
 from services.image_task_view import canonical_image_task_status, image_task_page, image_task_row
-from services.log_service import LoggedCall
+from services.log_service import (
+    LoggedCall,
+    http_exception_admin_message,
+    http_exception_log_fields,
+)
 from services.quota_service import image_quota_units, reserve_quota
 
 
@@ -162,22 +172,93 @@ def _image_quota_payload(stats: dict) -> dict[str, object]:
     }
 
 
+def _http_stage_for_code(code: str, default: str = "请求参数") -> str:
+    return {
+        "unsupported_model": "模型不支持",
+        "idempotency_conflict": "幂等冲突",
+        "task_state_conflict": "任务状态",
+        "invalid_image_input": "参考图无效",
+        "image_task_not_found": "任务不存在",
+        "quota_commit_failed": "额度提交",
+        "image_queue_unavailable": "队列不可用",
+        "image_queue_resource_pressure": "队列不可用",
+        "image_queue_storage_full": "存储已满",
+        "image_result_unavailable": "结果不可用",
+        "invalid_client_task_id": "请求参数",
+        "idempotency_key_required": "请求参数",
+        "editable_file_task_not_found": "可编辑文件",
+        "editable_file_conflict": "可编辑文件",
+        "editable_file_task_not_terminal": "可编辑文件",
+    }.get(str(code or "").strip(), default)
+
+
 def _image_queue_http_exception(exc: Exception) -> HTTPException:
     code = str(getattr(exc, "code", "") or "image_queue_unavailable")
-    detail: dict[str, object] = {
-        "error": code,
-        "message": image_queue_http_message(code),
-    }
-    reason = str(getattr(exc, "reason", "") or "").strip()
-    if code == "image_queue_resource_pressure" and reason:
-        detail["reason"] = reason[:80]
-    return HTTPException(status_code=503, detail=detail)
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error": code,
+            "message": image_queue_http_message(code),
+        },
+    )
+
+
+def _has_public_chinese(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def _public_value_error_http_exception(exc: Exception) -> HTTPException:
+    if isinstance(exc, InvalidImageArtifact):
+        return HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_image_input",
+                "message": public_http_chinese_error(
+                    stage="参考图无效",
+                    reason=IMAGE_INPUT_INVALID_PUBLIC_MESSAGE,
+                ),
+            },
+        )
+    public = str(getattr(exc, "public_message", "") or "").strip()
+    code = str(getattr(exc, "code", "") or "").strip() or "bad_request"
+    if public:
+        return HTTPException(
+            status_code=400,
+            detail={
+                "error": code,
+                "message": public_http_chinese_error(
+                    stage=_http_stage_for_code(code),
+                    reason=public,
+                ),
+            },
+        )
+    text = str(exc).strip()
+    if _has_public_chinese(text):
+        return HTTPException(
+            status_code=400,
+            detail={
+                "error": public_http_chinese_error(stage="请求参数", reason=text),
+            },
+        )
+    return HTTPException(
+        status_code=400,
+        detail={
+            "error": "bad_request",
+            "message": public_http_chinese_error(
+                stage="请求参数",
+                reason=VALIDATION_ERROR_PUBLIC_MESSAGE,
+            ),
+        },
+    )
 
 
 def _image_task_not_found_http_exception(task_id: str = "") -> HTTPException:
     detail: dict[str, object] = {
         "error": "image_task_not_found",
-        "message": IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE,
+        "message": public_http_chinese_error(
+            stage="任务不存在",
+            reason=IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE,
+        ),
     }
     if task_id:
         detail["task_id"] = task_id
@@ -189,49 +270,123 @@ def _image_result_unavailable_http_exception(
     *,
     task_id: str = "",
 ) -> HTTPException:
-    del exc
     detail: dict[str, object] = {
         "error": "image_result_unavailable",
-        "message": IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE,
+        "message": public_http_chinese_error(
+            stage="结果不可用",
+            reason=IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE,
+        ),
     }
     if task_id:
         detail["task_id"] = task_id
-    return HTTPException(status_code=409, detail=detail)
+    http_exc = HTTPException(status_code=409, detail=detail)
+    if isinstance(exc, BaseException):
+        http_exc.__cause__ = exc
+    return http_exc
+
+
+def _stream_openai_error(
+    *,
+    message: str,
+    code: str,
+    error_type: str,
+    task_id: str,
+) -> dict[str, object]:
+    return {
+        "error": {
+            "message": message,
+            "type": error_type,
+            "code": code,
+            "task_id": task_id,
+        },
+    }
+
+
+def _stream_error_from_http_detail(detail: object, task_id: str) -> dict[str, object] | None:
+    if isinstance(detail, dict):
+        nested = detail.get("error")
+        if isinstance(nested, dict):
+            message = str(nested.get("message") or "").strip()
+            code = str(nested.get("code") or nested.get("type") or "internal_error").strip()
+            error_type = str(nested.get("type") or "server_error").strip() or "server_error"
+        else:
+            message = str(detail.get("message") or "").strip()
+            code = str(detail.get("error") or "internal_error").strip() or "internal_error"
+            error_type = "server_error"
+        if message:
+            return _stream_openai_error(
+                message=message,
+                code=code,
+                error_type=error_type,
+                task_id=task_id,
+            )
+        return None
+    text = str(detail or "").strip()
+    if not text:
+        return None
+    return _stream_openai_error(
+        message=text,
+        code="internal_error",
+        error_type="server_error",
+        task_id=task_id,
+    )
 
 
 def _image_stream_error_payload(exc: Exception, task_id: str) -> dict[str, object]:
     if isinstance(exc, _IMAGE_QUEUE_ERRORS):
-        detail = _image_queue_http_exception(exc).detail
-        if isinstance(detail, dict):
-            return {
-                "error": {
-                    "message": str(detail.get("message") or image_queue_http_message()),
-                    "type": "server_error",
-                    "code": str(detail.get("error") or "image_queue_unavailable"),
-                    "task_id": task_id,
-                    **(
-                        {"reason": str(detail["reason"])[:80]}
-                        if detail.get("reason")
-                        else {}
-                    ),
-                },
-            }
+        payload = _stream_error_from_http_detail(
+            _image_queue_http_exception(exc).detail,
+            task_id,
+        )
+        if payload is not None:
+            return payload
+    if isinstance(exc, HTTPException):
+        payload = _stream_error_from_http_detail(exc.detail, task_id)
+        if payload is not None:
+            return payload
+    if isinstance(exc, ImageGenerationError):
+        payload = exc.to_openai_error()
+        error = payload.get("error")
+        if isinstance(error, dict):
+            error["task_id"] = task_id or str(error.get("task_id") or "")
+        return payload
+    if isinstance(exc, InvalidImageArtifact):
+        failure = image_failure("invalid_image_result")
+        return _stream_openai_error(
+            message=public_image_error_message(failure),
+            code=failure.code,
+            error_type=failure.error_type,
+            task_id=task_id,
+        )
+    if isinstance(exc, TimeoutError):
+        failure = image_failure("image_task_pending")
+        return _stream_openai_error(
+            message=public_image_error_message(failure),
+            code=failure.code,
+            error_type=failure.error_type,
+            task_id=task_id,
+        )
+    if str(exc or "").strip() == IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE:
+        payload = _stream_error_from_http_detail(
+            _image_task_not_found_http_exception(task_id).detail,
+            task_id,
+        )
+        if payload is not None:
+            return payload
     failure = image_failure("internal_error")
-    return {
-        "error": {
-            "message": public_image_error_message(failure),
-            "type": failure.error_type,
-            "code": failure.code,
-            "task_id": task_id,
-        },
-    }
+    return _stream_openai_error(
+        message=public_image_error_message(failure),
+        code=failure.code,
+        error_type=failure.error_type,
+        task_id=task_id,
+    )
 
 
 async def filter_or_log(call: LoggedCall, text: str) -> None:
     try:
         await run_in_threadpool(check_request, text)
     except HTTPException as exc:
-        call.log("调用失败", status="failed", error=str(exc.detail))
+        _log_task_failure(call, exc)
         raise
 
 
@@ -249,9 +404,9 @@ def _commit_quota_or_raise(quota, result: object, idempotency_key: str) -> None:
             status_code=503,
             detail={
                 "error": "quota_commit_failed",
-                "message": (
-                    "image task was created but quota state could not be committed; "
-                    "poll the task_id or retry with the same idempotency key"
+                "message": public_http_chinese_error(
+                    stage="额度提交",
+                    reason=QUOTA_COMMIT_FAILED_PUBLIC_MESSAGE,
                 ),
                 "task_id": _task_id_from_result(result),
                 "idempotency_key": str(idempotency_key or ""),
@@ -259,20 +414,43 @@ def _commit_quota_or_raise(quota, result: object, idempotency_key: str) -> None:
         ) from exc
 
 
-def _http_detail_error(exc: HTTPException) -> str:
-    detail = exc.detail
-    if isinstance(detail, dict):
-        return str(detail.get("error") or detail.get("message") or exc.status_code)
-    return str(detail or exc.status_code)
+def _admin_task_failure_message(exc: Exception, *, error: str = "") -> str:
+    original = str(exc or "").strip() or exc.__class__.__name__
+    code = str(getattr(exc, "code", "") or "").strip()
+    requested = str(error or "").strip()
+    if requested and requested not in {code, original}:
+        return requested
+    return original
+
+
+def _public_task_failure_message(exc: Exception) -> str:
+    public = str(getattr(exc, "public_message", "") or "").strip()
+    if public:
+        return public
+    if isinstance(exc, _IMAGE_QUEUE_ERRORS):
+        return image_queue_http_message(str(getattr(exc, "code", "") or ""))
+    return ""
 
 
 def _log_task_failure(call: LoggedCall, exc: Exception, *, error: str = "") -> None:
-    if not error:
-        if isinstance(exc, HTTPException):
-            error = _http_detail_error(exc)
-        else:
-            error = str(getattr(exc, "code", "") or str(exc) or exc.__class__.__name__)
-    call.log("调用失败", status="failed", error=error)
+    extra = None
+    if isinstance(exc, HTTPException):
+        extra = http_exception_log_fields(exc)
+        admin = error or http_exception_admin_message(exc)
+    else:
+        admin = _admin_task_failure_message(exc, error=error)
+        extra = {
+            "raw_error": admin,
+            "upstream_error": admin,
+            "raw_detail": admin,
+        }
+        public = _public_task_failure_message(exc)
+        if public:
+            extra["public_error"] = public
+        code = str(getattr(exc, "code", "") or "").strip()
+        if code:
+            extra["error_code"] = code
+    call.log("调用失败", status="failed", error=admin, extra=extra)
 
 
 def _log_task_queued(call: LoggedCall, result: object) -> None:
@@ -374,14 +552,14 @@ def create_router() -> APIRouter:
             _log_task_failure(call, exc, error=exc.code)
             raise HTTPException(
                 status_code=409,
-                detail={"error": exc.code, "message": str(exc)},
+                detail={"error": exc.code, "message": exc.public_message},
             ) from exc
         except _IMAGE_QUEUE_ERRORS as exc:
             _log_task_failure(call, exc, error=exc.code)
             raise _image_queue_http_exception(exc) from exc
         except ValueError as exc:
             _log_task_failure(call, exc)
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+            raise _public_value_error_http_exception(exc) from exc
         except Exception as exc:
             _log_task_failure(call, exc)
             raise
@@ -395,7 +573,16 @@ def create_router() -> APIRouter:
         payload, image_sources, mask_sources = await parse_image_edit_request(request)
         client_task_id = str(payload.get("client_task_id") or "").strip()
         if not client_task_id:
-            raise HTTPException(status_code=400, detail={"error": "client_task_id is required"})
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_client_task_id",
+                    "message": public_http_chinese_error(
+                        stage="请求参数",
+                        reason="必须提供 client_task_id。",
+                    ),
+                },
+            )
         prompt = str(payload["prompt"])
         model = str(payload["model"])
         call = LoggedCall(identity, "/api/image-tasks/edits", model, "图生图任务", request_text=prompt)
@@ -429,7 +616,7 @@ def create_router() -> APIRouter:
             _log_task_failure(call, exc, error=exc.code)
             raise HTTPException(
                 status_code=409,
-                detail={"error": exc.code, "message": str(exc)},
+                detail={"error": exc.code, "message": exc.public_message},
             ) from exc
         except HTTPException as exc:
             if quota is not None:
@@ -445,7 +632,7 @@ def create_router() -> APIRouter:
             if quota is not None:
                 quota.cancel()
             _log_task_failure(call, exc)
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+            raise _public_value_error_http_exception(exc) from exc
         except Exception as exc:
             if quota is not None:
                 quota.cancel()
@@ -487,7 +674,7 @@ def create_router() -> APIRouter:
             _log_task_failure(call, exc, error=exc.code)
             raise HTTPException(
                 status_code=409,
-                detail={"error": exc.code, "message": str(exc)},
+                detail={"error": exc.code, "message": exc.public_message},
             ) from exc
         except HTTPException as exc:
             quota.cancel()
@@ -500,7 +687,7 @@ def create_router() -> APIRouter:
         except ValueError as exc:
             quota.cancel()
             _log_task_failure(call, exc)
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+            raise _public_value_error_http_exception(exc) from exc
         except Exception as exc:
             quota.cancel()
             _log_task_failure(call, exc)
@@ -531,7 +718,9 @@ def create_router() -> APIRouter:
             )
             return _public_task_row(result)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+            if str(exc).strip() == IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE:
+                raise _image_task_not_found_http_exception(task_id) from exc
+            raise _public_value_error_http_exception(exc) from exc
         except _IMAGE_QUEUE_ERRORS as exc:
             raise _image_queue_http_exception(exc) from exc
 
@@ -577,7 +766,7 @@ def create_router() -> APIRouter:
         except TaskStateConflict as exc:
             raise HTTPException(
                 status_code=409,
-                detail={"error": exc.code, "message": str(exc)},
+                detail={"error": exc.code, "message": exc.public_message},
             ) from exc
         except InvalidImageArtifact as exc:
             raise _image_result_unavailable_http_exception(exc, task_id=task_id) from exc
@@ -719,9 +908,7 @@ def create_router() -> APIRouter:
                             # 订阅超时不等于任务失败：保留非终态，并提示客户端继续轮询。
                             pending_payload = _public_task_row(progress or current_snapshot)
                             pending_payload["error_code"] = "image_task_pending"
-                            pending_payload["public_error"] = (
-                                "Image task is still running; continue polling."
-                            )
+                            pending_payload["public_error"] = IMAGE_TASK_PENDING_PUBLIC_MESSAGE
                             yield f"event: {event_prefix}.in_progress\n"
                             yield f"data: {json.dumps(pending_payload, ensure_ascii=False)}\n\n"
                             yield "data: [DONE]\n\n"
@@ -732,6 +919,7 @@ def create_router() -> APIRouter:
                     "event": "image_task_stream_error",
                     "task_id": task_id,
                     "error_type": exc.__class__.__name__,
+                    "error": str(exc),
                 })
                 error_payload = _image_stream_error_payload(exc, task_id)
                 yield "event: error\n"

@@ -38,6 +38,7 @@ from services.account_operation_events import (
 )
 from services.account_import_job import RemoteImportJobConflictError
 from services.account_test_service import account_test_service
+from utils.log import logger
 from services.account_service import account_service
 from services.account_view import account_detail, account_row, account_status_category
 from services.config import config
@@ -52,7 +53,7 @@ from services.sub2api_service import (
     sub2api_import_service,
 )
 from utils.diagnostics import sanitize_diagnostic_text
-from utils.helper import anonymize_token
+from utils.helper import anonymize_token, token_fingerprint
 
 
 _ACCOUNT_OPERATION_TASKS: set[asyncio.Task[Any]] = set()
@@ -260,7 +261,7 @@ def _target_account_group_id(value: str | None) -> str | None:
     if not group_id:
         return ""
     if not any(group.get("id") == group_id for group in _account_group_payload()["groups"]):
-        raise HTTPException(status_code=400, detail={"error": "account group not found"})
+        raise HTTPException(status_code=400, detail={"error": "找不到该账号分组。"})
     return group_id
 
 
@@ -312,13 +313,13 @@ def _account_group_payload(groups: list[dict[str, Any]] | None = None) -> dict[s
 def _upsert_account_group(body: AccountGroupRequest) -> dict[str, Any]:
     group_id = _account_group_id(body.id or body.name)
     if not group_id:
-        raise ValueError("account group id is required")
+        raise ValueError("必须提供账号分组 ID。")
 
     def persist(normalized_references: list[str]) -> dict[str, Any]:
         groups = _config_dict_list("account_groups")
         exists = any(_account_group_id(group.get("id")) == group_id for group in groups)
         if body.create_only and exists:
-            raise ValueError("account group already exists")
+            raise ValueError("账号分组已存在。")
         projection = project_proxy_assignment(normalized_references[0])
         item = {
             "id": group_id,
@@ -477,7 +478,7 @@ def _resolve_account_targets(
 
 def _account_not_found_errors(account_ids: list[str]) -> list[dict[str, str]]:
     return [
-        {"id": account_id, "code": "account_not_found", "message": "account not found"}
+        {"id": account_id, "code": "account_not_found", "message": "找不到该账号。"}
         for account_id in dict.fromkeys(
             _clean_text(item) for item in account_ids if _clean_text(item)
         )
@@ -508,6 +509,7 @@ def _refresh_error_id_map(targets: list[tuple[str, str]]) -> dict[str, str]:
         if not token or not account_id:
             continue
         mapping[token] = account_id
+        mapping[token_fingerprint(token)] = account_id
         mapping[anonymize_token(token)] = account_id
     return mapping
 
@@ -581,7 +583,7 @@ def _sanitize_refresh_errors(
     for error in errors:
         if isinstance(error, dict):
             token_hint = _clean_text(error.get("token"))
-            message = _clean_text(error.get("error") or error.get("message")) or "account refresh failed"
+            message = _clean_text(error.get("error") or error.get("message")) or "账号刷新失败。"
             code = _clean_text(error.get("code") or error.get("failure_code")) or "account_refresh_failed"
             item: dict[str, Any] = {
                 "id": _clean_text(error.get("id")) or id_by_token_hint.get(token_hint, ""),
@@ -595,13 +597,13 @@ def _sanitize_refresh_errors(
             item = {
                 "id": "",
                 "code": "account_refresh_failed",
-                "message": _clean_text(error) or "account refresh failed",
+                "message": _clean_text(error) or "账号刷新失败。",
             }
         item["message"] = sanitize_diagnostic_text(
             item["message"],
             sensitive_values=sensitive_values,
             proxy_values=proxy_values,
-            limit=2000,
+            limit=0,
         )
         for key in diagnostic_keys:
             value = item.get(key)
@@ -610,7 +612,7 @@ def _sanitize_refresh_errors(
                     value,
                     sensitive_values=sensitive_values,
                     proxy_values=proxy_values,
-                    limit=500,
+                    limit=0,
                 )
         result.append(item)
     return result
@@ -659,7 +661,7 @@ def _account_status_operation(
     if requested in expected_status and status != expected_status[requested]:
         raise HTTPException(
             status_code=400,
-            detail={"error": f"operation {requested} requires status {expected_status[requested]}"},
+            detail={"error": f"操作 {requested} 要求账号状态为 {expected_status[requested]}。"},
         )
     resolved = requested or "update"
     return {
@@ -724,7 +726,7 @@ def _account_mutation_events(
         if error_code and error_message:
             event_message = f"{error_code} · {error_message}"
         else:
-            event_message = error_message or error_code or "account operation failed"
+            event_message = error_message or error_code or "账号操作失败"
         sequence += 1
         raw_events.append({
             "sequence": sequence,
@@ -1236,7 +1238,7 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         account = _get_account_by_id(account_id)
         if account is None:
-            raise HTTPException(status_code=404, detail={"error": "account not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该账号。"})
         return {"item": _account_detail_for_api(account)}
 
     @router.post(
@@ -1250,7 +1252,7 @@ def create_router() -> APIRouter:
     ):
         identity = require_admin(authorization)
         if _get_account_by_id(account_id) is None:
-            raise HTTPException(status_code=404, detail={"error": "account not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该账号。"})
         payload = {**body.model_dump(), "account_id": account_id}
         call = LoggedCall(
             identity,
@@ -1270,10 +1272,10 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         account = _get_account_by_id(account_id)
         if account is None:
-            raise HTTPException(status_code=404, detail={"error": "account not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该账号。"})
         access_token = _clean_text(account.get("access_token"))
         if not access_token:
-            raise HTTPException(status_code=404, detail={"error": "access token not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该 Access Token。"})
         return JSONResponse(
             {"access_token": access_token},
             headers={"Cache-Control": "no-store"},
@@ -1287,10 +1289,10 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         account = _get_account_by_id(account_id)
         if account is None:
-            raise HTTPException(status_code=404, detail={"error": "account not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该账号。"})
         refresh_token = _clean_text(account.get("refresh_token"))
         if not refresh_token:
-            raise HTTPException(status_code=404, detail={"error": "refresh token not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该 Refresh Token。"})
         return JSONResponse(
             {"refresh_token": refresh_token},
             headers={"Cache-Control": "no-store"},
@@ -1317,7 +1319,7 @@ def create_router() -> APIRouter:
         groups = _config_dict_list("account_groups")
         next_groups = [group for group in groups if _account_group_id(group.get("id")) != normalized]
         if len(next_groups) == len(groups):
-            raise HTTPException(status_code=404, detail={"error": "account group not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该账号分组。"})
         updated = config.update({"account_groups": next_groups})
         targets = [
             (
@@ -1371,7 +1373,7 @@ def create_router() -> APIRouter:
         payload_tokens = [_account_payload_token(item) for item in account_payloads]
         tokens = _unique_tokens([*body.tokens, *payload_tokens])
         if not tokens:
-            raise HTTPException(status_code=400, detail={"error": "tokens is required"})
+            raise HTTPException(status_code=400, detail={"error": "必须提供 tokens。"})
         try:
             if account_payloads:
                 result = await run_in_threadpool(
@@ -1500,14 +1502,14 @@ def create_router() -> APIRouter:
     async def delete_accounts(body: AccountDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         if not body.selection and not body.account_ids and not body.tokens:
-            raise HTTPException(status_code=400, detail={"error": "account_ids is required"})
+            raise HTTPException(status_code=400, detail={"error": "必须提供 account_ids。"})
         targets, missing_ids = _account_selection_targets(
             body.selection,
             body.account_ids,
             body.tokens,
         )
         if not targets:
-            raise HTTPException(status_code=400, detail={"error": "no valid accounts selected"})
+            raise HTTPException(status_code=400, detail={"error": "没有选中有效账号。"})
         labels = _account_operation_labels(targets)
         tokens = [token for token, _account_id in targets]
         target_ids = [account_id for _token, account_id in targets]
@@ -1568,7 +1570,7 @@ def create_router() -> APIRouter:
             except Exception:
                 account_service.finish_refresh_progress(
                     progress_id,
-                    error="account deletion failed",
+                    error="删除账号失败",
                 )
 
         _schedule_account_operation(_do_delete_accounts())
@@ -1589,7 +1591,7 @@ def create_router() -> APIRouter:
         ))
         legacy_tokens = _unique_tokens(body.access_tokens)
         if not requested_ids and not legacy_tokens:
-            raise HTTPException(status_code=400, detail={"error": "account_ids is required"})
+            raise HTTPException(status_code=400, detail={"error": "必须提供 account_ids。"})
         targets, missing_ids = _account_targets(requested_ids, legacy_tokens)
         abnormal_targets = [
             (token, account_id)
@@ -1649,7 +1651,7 @@ def create_router() -> APIRouter:
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "error": "no valid accounts selected",
+                    "error": "没有选中有效账号。",
                     "errors": _account_not_found_errors(missing_ids),
                 },
             )
@@ -1707,7 +1709,7 @@ def create_router() -> APIRouter:
             except Exception:
                 account_service.finish_refresh_progress(
                     progress_id,
-                    error="access token refresh failed",
+                    error="刷新访问令牌失败",
                 )
 
         _schedule_account_operation(_do_refresh_access_tokens())
@@ -1738,7 +1740,7 @@ def create_router() -> APIRouter:
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "error": "no valid accounts selected",
+                    "error": "没有选中有效账号。",
                     "errors": _account_not_found_errors(missing_ids),
                 },
             )
@@ -1796,7 +1798,7 @@ def create_router() -> APIRouter:
             except Exception:
                 account_service.finish_refresh_progress(
                     progress_id,
-                    error="account and quota synchronization failed",
+                    error="账号与额度同步失败",
                 )
 
         _schedule_account_operation(_do_sync_accounts_and_quota())
@@ -1814,7 +1816,7 @@ def create_router() -> APIRouter:
     ) -> dict[str, Any]:
         progress = account_service.get_refresh_progress(progress_id)
         if progress is None:
-            raise HTTPException(status_code=404, detail={"error": "progress not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该进度。"})
         return _account_operation_progress_for_api(
             progress,
             legacy_sync_alias=legacy_sync_alias,
@@ -1857,14 +1859,14 @@ def create_router() -> APIRouter:
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "error": "one or more accounts were not found",
+                    "error": "找不到部分账号。",
                     "errors": [
                         *_account_not_found_errors(missing_ids),
                         *[
                             {
                                 "id": anonymize_token(token),
                                 "code": "account_not_found",
-                                "message": "legacy access token was not found",
+                                "message": "找不到该历史 Access Token。",
                             }
                             for token in missing_legacy_tokens
                         ],
@@ -1872,7 +1874,7 @@ def create_router() -> APIRouter:
                 },
             )
         if not targets:
-            raise HTTPException(status_code=400, detail={"error": "no valid accounts selected"})
+            raise HTTPException(status_code=400, detail={"error": "没有选中有效账号。"})
         access_tokens = [token for token, _account_id in targets]
         items = account_service.build_export_items(
             access_tokens,
@@ -1928,9 +1930,9 @@ def create_router() -> APIRouter:
             current = account_service.get_account(legacy_token)
             account_id = _clean_text((current or {}).get("management_id"))
         else:
-            raise HTTPException(status_code=400, detail={"error": "account id is required"})
+            raise HTTPException(status_code=400, detail={"error": "必须提供账号 ID。"})
         if current is None or not account_id:
-            raise HTTPException(status_code=404, detail={"error": "account not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该账号。"})
         updates = {
             key: value
             for key, value in {
@@ -1950,7 +1952,7 @@ def create_router() -> APIRouter:
             if replacement_refresh_token:
                 updates["refresh_token"] = replacement_refresh_token
         if not updates:
-            raise HTTPException(status_code=400, detail={"error": "no updates provided"})
+            raise HTTPException(status_code=400, detail={"error": "没有提供要更新的内容。"})
         access_token = _clean_text(current.get("access_token"))
         labels = _account_operation_labels([(access_token, account_id)])
         try:
@@ -1977,7 +1979,7 @@ def create_router() -> APIRouter:
                 )
                 payload["item"] = None
                 return payload
-            raise HTTPException(status_code=404, detail={"error": "account not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该账号。"})
         payload = _account_mutation_response(
             updated=1,
             removed=0,
@@ -1995,10 +1997,10 @@ def create_router() -> APIRouter:
     async def batch_update_accounts(body: AccountBatchUpdateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         if not body.selection and not body.account_ids and not body.access_tokens:
-            raise HTTPException(status_code=400, detail={"error": "account_ids is required"})
+            raise HTTPException(status_code=400, detail={"error": "必须提供 account_ids。"})
         updates = {key: value for key, value in {"status": body.status}.items() if value is not None}
         if not updates:
-            raise HTTPException(status_code=400, detail={"error": "no updates provided"})
+            raise HTTPException(status_code=400, detail={"error": "没有提供要更新的内容。"})
         action, success_message, failure_message = _account_status_operation(
             body.status,
             body.operation,
@@ -2009,7 +2011,7 @@ def create_router() -> APIRouter:
             body.access_tokens,
         )
         if not targets:
-            raise HTTPException(status_code=400, detail={"error": "no valid accounts selected"})
+            raise HTTPException(status_code=400, detail={"error": "没有选中有效账号。"})
         labels = _account_operation_labels(targets)
         tokens = [token for token, _account_id in targets]
         target_ids = [account_id for _token, account_id in targets]
@@ -2076,7 +2078,7 @@ def create_router() -> APIRouter:
             except Exception:
                 account_service.finish_refresh_progress(
                     progress_id,
-                    error="account batch update failed",
+                    error="批量更新账号失败",
                 )
 
         _schedule_account_operation(_do_batch_update_accounts())
@@ -2089,17 +2091,17 @@ def create_router() -> APIRouter:
     async def bind_accounts_group(body: AccountGroupBindRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         if not body.selection and not body.account_ids and not body.access_tokens:
-            raise HTTPException(status_code=400, detail={"error": "account_ids is required"})
+            raise HTTPException(status_code=400, detail={"error": "必须提供 account_ids。"})
         group_id = "" if body.group_id.strip() == "__ungrouped__" else _account_group_id(body.group_id)
         if group_id and not any(group.get("id") == group_id for group in _account_group_payload()["groups"]):
-            raise HTTPException(status_code=404, detail={"error": "account group not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该账号分组。"})
         targets, missing_ids = _account_selection_targets(
             body.selection,
             body.account_ids,
             body.access_tokens,
         )
         if not targets:
-            raise HTTPException(status_code=400, detail={"error": "no valid accounts selected"})
+            raise HTTPException(status_code=400, detail={"error": "没有选中有效账号。"})
         labels = _account_operation_labels(targets)
         result = await run_in_threadpool(
             account_service.update_accounts,
@@ -2191,7 +2193,7 @@ def create_router() -> APIRouter:
         account = account_service.get_account(tokens["access_token"])
         account_id = _clean_text((account or {}).get("management_id"))
         if not account_id:
-            raise HTTPException(status_code=500, detail={"error": "created account could not be resolved"})
+            raise HTTPException(status_code=500, detail={"error": "新创建的账号无法解析。"})
         return _account_mutation_payload(
             added=max(0, int(add_result.get("added") or 0)),
             skipped=max(0, int(add_result.get("skipped") or 0)),
@@ -2208,9 +2210,9 @@ def create_router() -> APIRouter:
     async def create_cpa_pool(body: CPAPoolCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         if not body.base_url.strip():
-            raise HTTPException(status_code=400, detail={"error": "base_url is required"})
+            raise HTTPException(status_code=400, detail={"error": "必须提供服务地址。"})
         if not body.secret_key.strip():
-            raise HTTPException(status_code=400, detail={"error": "secret_key is required"})
+            raise HTTPException(status_code=400, detail={"error": "必须提供密钥。"})
         pool = cpa_config.add_pool(name=body.name, base_url=body.base_url, secret_key=body.secret_key)
         return {"pool": sanitize_cpa_pool(pool), "pools": sanitize_cpa_pools(cpa_config.list_pools())}
 
@@ -2222,10 +2224,10 @@ def create_router() -> APIRouter:
         except ValueError as exc:
             raise HTTPException(
                 status_code=409,
-                detail={"error": "CPA import job is active"},
+                detail={"error": "CPA 导入任务正在执行。"},
             ) from exc
         if pool is None:
-            raise HTTPException(status_code=404, detail={"error": "pool not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该号池。"})
         return {"pool": sanitize_cpa_pool(pool), "pools": sanitize_cpa_pools(cpa_config.list_pools())}
 
     @router.delete("/api/cpa/pools/{pool_id}")
@@ -2236,10 +2238,10 @@ def create_router() -> APIRouter:
         except ValueError as exc:
             raise HTTPException(
                 status_code=409,
-                detail={"error": "CPA import job is active"},
+                detail={"error": "CPA 导入任务正在执行。"},
             ) from exc
         if not deleted:
-            raise HTTPException(status_code=404, detail={"error": "pool not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该号池。"})
         return {"pools": sanitize_cpa_pools(cpa_config.list_pools())}
 
     @router.get("/api/cpa/pools/{pool_id}/files")
@@ -2247,7 +2249,7 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         pool = cpa_config.get_pool(pool_id)
         if pool is None:
-            raise HTTPException(status_code=404, detail={"error": "pool not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该号池。"})
         return {"pool_id": pool_id, "files": await run_in_threadpool(list_remote_files, pool)}
 
     @router.post("/api/cpa/pools/{pool_id}/import")
@@ -2255,7 +2257,7 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         pool = cpa_config.get_pool(pool_id)
         if pool is None:
-            raise HTTPException(status_code=404, detail={"error": "pool not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该号池。"})
         try:
             target_group_id = _target_account_group_id(body.target_group_id)
             job = cpa_import_service.start_import(
@@ -2274,7 +2276,7 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         pool = cpa_config.get_pool(pool_id)
         if pool is None:
-            raise HTTPException(status_code=404, detail={"error": "pool not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该号池。"})
         return {"import_job": pool.get("import_job")}
 
     @router.get("/api/sub2api/servers")
@@ -2286,11 +2288,11 @@ def create_router() -> APIRouter:
     async def create_sub2api_server(body: Sub2APIServerCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         if not body.base_url.strip():
-            raise HTTPException(status_code=400, detail={"error": "base_url is required"})
+            raise HTTPException(status_code=400, detail={"error": "必须提供服务地址。"})
         has_login = body.email.strip() and body.password.strip()
         has_api_key = bool(body.api_key.strip())
         if not has_login and not has_api_key:
-            raise HTTPException(status_code=400, detail={"error": "email+password or api_key is required"})
+            raise HTTPException(status_code=400, detail={"error": "必须提供邮箱加密码，或 API Key。"})
         server = sub2api_config.add_server(
             name=body.name,
             base_url=body.base_url,
@@ -2309,10 +2311,10 @@ def create_router() -> APIRouter:
         except ValueError as exc:
             raise HTTPException(
                 status_code=409,
-                detail={"error": "Sub2API import job is active"},
+                detail={"error": "Sub2API 导入任务正在执行。"},
             ) from exc
         if server is None:
-            raise HTTPException(status_code=404, detail={"error": "server not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该服务器。"})
         return {"server": sanitize_sub2api_server(server), "servers": sanitize_sub2api_servers(sub2api_config.list_servers())}
 
     @router.delete("/api/sub2api/servers/{server_id}")
@@ -2323,10 +2325,10 @@ def create_router() -> APIRouter:
         except ValueError as exc:
             raise HTTPException(
                 status_code=409,
-                detail={"error": "Sub2API import job is active"},
+                detail={"error": "Sub2API 导入任务正在执行。"},
             ) from exc
         if not deleted:
-            raise HTTPException(status_code=404, detail={"error": "server not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该服务器。"})
         return {"servers": sanitize_sub2api_servers(sub2api_config.list_servers())}
 
     @router.get("/api/sub2api/servers/{server_id}/groups")
@@ -2334,11 +2336,12 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         server = sub2api_config.get_server(server_id)
         if server is None:
-            raise HTTPException(status_code=404, detail={"error": "server not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该服务器。"})
         try:
             groups = await run_in_threadpool(sub2api_list_remote_groups, server)
         except Exception as exc:
-            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+            logger.error({"event": "sub2api_list_groups_failed", "error": str(exc), "type": type(exc).__name__})
+            raise HTTPException(status_code=502, detail={"error": "无法获取 Sub2API 分组。"}) from exc
         return {"server_id": server_id, "groups": groups}
 
     @router.get("/api/sub2api/servers/{server_id}/accounts")
@@ -2350,13 +2353,14 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         server = sub2api_config.get_server(server_id)
         if server is None:
-            raise HTTPException(status_code=404, detail={"error": "server not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该服务器。"})
         if group_id is not None:
             server = {**server, "group_id": group_id}
         try:
             accounts = await run_in_threadpool(sub2api_list_remote_accounts, server)
         except Exception as exc:
-            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+            logger.error({"event": "sub2api_list_accounts_failed", "error": str(exc), "type": type(exc).__name__})
+            raise HTTPException(status_code=502, detail={"error": "无法获取 Sub2API 账号。"}) from exc
         return {"server_id": server_id, "accounts": accounts}
 
     @router.post("/api/sub2api/servers/{server_id}/import")
@@ -2364,7 +2368,7 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         server = sub2api_config.get_server(server_id)
         if server is None:
-            raise HTTPException(status_code=404, detail={"error": "server not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该服务器。"})
         try:
             job = sub2api_import_service.start_import(
                 server,
@@ -2384,7 +2388,7 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         server = sub2api_config.get_server(server_id)
         if server is None:
-            raise HTTPException(status_code=404, detail={"error": "server not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该服务器。"})
         return {"import_job": server.get("import_job")}
 
     return router

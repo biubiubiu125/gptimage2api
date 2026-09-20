@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import UUID, uuid4
 
+from services.image_failure import UNSUPPORTED_MODEL_PUBLIC_MESSAGE, public_http_chinese_error
 from services.image_queue.settings import ImageQueueSettings
 from utils.helper import WEB_IMAGE_MODELS
 
@@ -18,6 +19,13 @@ IDEMPOTENCY_KEY_MAX_LENGTH = 200
 
 class UnsupportedImageModel(ValueError):
     code = "unsupported_model"
+
+    def __init__(self, message: str = "unsupported image model") -> None:
+        super().__init__(message)
+
+    @property
+    def public_message(self) -> str:
+        return public_http_chinese_error(stage="模型不支持", reason=UNSUPPORTED_MODEL_PUBLIC_MESSAGE)
 
 _HASH_EXCLUDED_KEYS = {
     "authorization",
@@ -44,7 +52,7 @@ def _clean(value: object) -> str:
 def _clean_replay_key(value: object, label: str) -> str:
     cleaned = _clean(value)
     if len(cleaned) > IDEMPOTENCY_KEY_MAX_LENGTH:
-        raise ValueError(f"{label} must be at most {IDEMPOTENCY_KEY_MAX_LENGTH} characters")
+        raise ValueError(f"{label} 最长 {IDEMPOTENCY_KEY_MAX_LENGTH} 个字符。")
     return cleaned
 
 

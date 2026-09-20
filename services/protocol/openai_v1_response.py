@@ -37,6 +37,7 @@ from utils.helper import (
     is_non_public_image_model,
     parse_image_count,
 )
+from services.image_failure import ImageGenerationError, image_failure
 from services.image_queue.idempotency import PUBLIC_IMAGE_MODEL, PUBLIC_IMAGE_MODELS, require_public_image_model
 from services.protocol.image_source_fingerprint import (
     image_part_source_marker,
@@ -86,7 +87,10 @@ def _http_public_image_model(model: object) -> str:
     try:
         return require_public_image_model(model)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        raise ImageGenerationError(
+            str(exc),
+            failure=image_failure("unsupported_model", raw_detail=str(exc)),
+        ) from exc
 
 
 def response_image_model(body: dict[str, Any]) -> str:
@@ -124,7 +128,7 @@ def durable_image_request(body: dict[str, Any]) -> tuple[dict[str, Any], str, st
         return payload, mode, response_format
     prompt = response_image_prompt(body)
     if not prompt:
-        raise HTTPException(status_code=400, detail={"error": "input text is required"})
+        raise HTTPException(status_code=400, detail={"error": "必须提供输入文本。"})
     model = response_image_model(body)
     image_inputs = extract_response_images(body.get("input"))
     tool = response_image_tool(body)
@@ -162,13 +166,13 @@ def extract_response_images(input_value: object) -> list[tuple[bytes, str]]:
         if len(images) + len(values) > MAX_JSON_IMAGE_INPUTS:
             raise HTTPException(
                 status_code=400,
-                detail={"error": f"too many image inputs; maximum is {MAX_JSON_IMAGE_INPUTS}"},
+                detail={"error": f"图片输入数量过多，最多 {MAX_JSON_IMAGE_INPUTS} 张。"},
             )
         total_bytes += sum(len(item[0]) for item in values)
         if total_bytes > MAX_JSON_IMAGE_TOTAL_BYTES:
             raise HTTPException(
                 status_code=400,
-                detail={"error": "combined image inputs exceed 100MB limit"},
+                detail={"error": "图片输入合计大小超过 100MB 限制。"},
             )
         images.extend(values)
 
@@ -176,7 +180,7 @@ def extract_response_images(input_value: object) -> list[tuple[bytes, str]]:
         if len(images) >= MAX_JSON_IMAGE_INPUTS:
             raise HTTPException(
                 status_code=400,
-                detail={"error": f"too many image inputs; maximum is {MAX_JSON_IMAGE_INPUTS}"},
+                detail={"error": f"图片输入数量过多，最多 {MAX_JSON_IMAGE_INPUTS} 张。"},
             )
 
     if isinstance(input_value, dict):
@@ -206,7 +210,7 @@ def extract_response_images(input_value: object) -> list[tuple[bytes, str]]:
                 if len(images) + nested_image_count > MAX_JSON_IMAGE_INPUTS:
                     raise HTTPException(
                         status_code=400,
-                        detail={"error": f"too many image inputs; maximum is {MAX_JSON_IMAGE_INPUTS}"},
+                        detail={"error": f"图片输入数量过多，最多 {MAX_JSON_IMAGE_INPUTS} 张。"},
                     )
             append_images(extract_image_from_message_content(item_content))
     return images
@@ -309,7 +313,7 @@ def _has_non_system_response_input(messages: list[dict[str, Any]]) -> bool:
 
 def require_response_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not _has_non_system_response_input(messages):
-        raise HTTPException(status_code=400, detail={"error": "input text is required"})
+        raise HTTPException(status_code=400, detail={"error": "必须提供输入文本。"})
     return messages
 
 
@@ -540,7 +544,7 @@ def stream_web_search_response(body: dict[str, Any], messages: list[dict[str, An
     messages = messages if messages is not None else messages_from_input(body.get("input"), body.get("instructions"))
     query = search_query_from_messages(messages) or extract_response_prompt(body.get("input"))
     if not query:
-        raise HTTPException(status_code=400, detail={"error": "input text is required for web_search"})
+        raise HTTPException(status_code=400, detail={"error": "联网搜索必须提供输入文本。"})
 
     response_id = f"resp_{uuid.uuid4().hex}"
     search_id = f"ws_{uuid.uuid4().hex}"
@@ -712,7 +716,7 @@ def stream_image_response(
             )
             yield completed
             return
-    raise RuntimeError("image generation failed")
+    raise RuntimeError("图片生成失败。")
 
 
 def collect_response(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
@@ -745,7 +749,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
 
     prompt = response_image_prompt(body)
     if not prompt:
-        raise HTTPException(status_code=400, detail={"error": "input text is required"})
+        raise HTTPException(status_code=400, detail={"error": "必须提供输入文本。"})
     payload, mode, response_format = durable_image_request(body)
     model = str(payload.get("model") or PUBLIC_IMAGE_MODEL).strip() or PUBLIC_IMAGE_MODEL
     input_image_tokens = count_image_content_tokens(_input_image_parts(body.get("input")), model)
@@ -754,10 +758,10 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         from services.image_failure import ImageGenerationError, image_failure
 
         raise ImageGenerationError(
-            "durable image task context is required",
+            "图片生成必须走持久化图片队列。",
             failure=image_failure(
                 "durable_context_required",
-                raw_detail="response image requests must enter the PostgreSQL durable queue",
+                raw_detail="Responses 生图必须进入 PostgreSQL 持久化图片队列。",
             ),
         )
     durable_image.ensure_submission(

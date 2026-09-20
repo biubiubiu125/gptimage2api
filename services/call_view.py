@@ -15,7 +15,7 @@ from services.request_detail_view import (
 )
 
 
-_SUMMARY_ERROR_LIMIT = 1000
+_SUMMARY_ERROR_LIMIT = 0
 
 _IMAGE_FAILURE_LABELS = {
     "upstream_error": "上游请求失败",
@@ -34,6 +34,7 @@ _IMAGE_FAILURE_LABELS = {
     "content_policy_violation": "内容安全策略拒绝",
     "invalid_image_input": "图片输入无效",
     "upstream_text_reply": "上游仅返回文本",
+    "conversation_mode_blocked": "会话模式拦截，无法调用图片工具",
     "no_image_generated": "未生成图片",
     "unsupported_model": "模型不支持生图",
     "image_download_failed": "图片下载失败",
@@ -440,7 +441,8 @@ def build_attempt_summary(value: Mapping[str, Any]) -> dict[str, Any]:
         "status_code": _int(attempt.get("status_code")),
         "error_code": error_code,
         "error_label": error_label,
-        "public_error": _clean(attempt.get("public_error") or attempt.get("error")),
+        "error": _clean(attempt.get("error")),
+        "public_error": _clean(attempt.get("public_error")),
         "upstream_error": _clean(attempt.get("upstream_error") or attempt.get("raw_upstream_error")),
         "upstream_text": _clean(
             attempt.get("upstream_text")
@@ -466,6 +468,7 @@ def build_attempt_summary(value: Mapping[str, Any]) -> dict[str, Any]:
         "show_failure": result_status != "success",
         "show_error_details": bool(
             summary["public_error"]
+            or summary["error"]
             or summary["upstream_error"]
             or summary["upstream_text"]
         ),
@@ -536,7 +539,7 @@ def _result_text(summary: Mapping[str, Any]) -> str:
     outcome = _clean(summary.get("outcome"))
     requested = _int(summary.get("image_requested_count"))
     succeeded = _int(summary.get("image_succeeded_count"))
-    public_error = _clean(summary.get("public_error"))
+    admin_error = _clean(summary.get("error"))
     error_label = _image_failure_label(summary.get("error_code"))
     summary_text = _clean(summary.get("summary"))
 
@@ -545,7 +548,7 @@ def _result_text(summary: Mapping[str, Any]) -> str:
     if outcome == "text_review":
         return "上游返回文本"
     if outcome in {"failed", "rate_limited"}:
-        return public_error or error_label or summary_text or "调用失败"
+        return admin_error or error_label or summary_text or "调用失败"
     if succeeded > 0:
         return (
             f"生成 {succeeded}/{requested} 张图片"
@@ -563,7 +566,7 @@ def _result_text(summary: Mapping[str, Any]) -> str:
         if business == "account":
             return summary_text or "账号操作完成"
         return "调用完成"
-    return summary_text or public_error or "调用完成"
+    return summary_text or "调用完成"
 
 
 def _build_presentation(
@@ -595,8 +598,6 @@ def _build_presentation(
     summary_text = _clean(summary.get("summary"))
     if outcome == "text_review" and summary_text:
         summary_text = summary_text.replace("流式调用失败", "文本").replace("调用失败", "文本")
-    if not summary_text:
-        summary_text = _clean(summary.get("public_error"))
 
     duration_ms = _int(summary.get("duration_ms"))
     return {
@@ -725,7 +726,8 @@ def build_call_summary(item: Mapping[str, Any], *, error_limit: int = _SUMMARY_E
     display_status = _clean(_value(item, "status"))
     if business == "account":
         display_status = _normalize_account_status(display_status)
-    public_error = _first_text(item, ("public_error", "error"))
+    admin_error = _first_text(item, ("error", "raw_error", "upstream_error"))
+    public_error = _first_text(item, ("public_error",))
     if error_limit > 0 and len(public_error) > error_limit:
         public_error = f"{public_error[:error_limit]}..."
     image_urls = call_image_urls(item)
@@ -750,6 +752,7 @@ def build_call_summary(item: Mapping[str, Any], *, error_limit: int = _SUMMARY_E
         "status_code": _int(_value(item, "status_code")),
         "error_code": _clean(_value(item, "error_code", _value(item, "failure_code"))),
         "public_error": public_error,
+        "error": admin_error,
         "image_requested_count": requested,
         "image_succeeded_count": succeeded,
         "image_failed_count": failed,
@@ -780,8 +783,10 @@ def build_call_detail(item: Mapping[str, Any]) -> dict[str, Any]:
         "upstream_error": _clean(
             detail.get("upstream_error")
             or detail.get("raw_upstream_error")
+            or detail.get("raw_error")
             or monitor.get("upstream_error")
             or monitor.get("raw_upstream_error")
+            or monitor.get("raw_error")
         ),
         "upstream_text": _clean(
             detail.get("upstream_text")
@@ -794,6 +799,22 @@ def build_call_detail(item: Mapping[str, Any]) -> dict[str, Any]:
             or monitor.get("upstream_message")
             or monitor.get("upstream_message_preview")
             or monitor.get("upstream_preview")
+        ),
+        "raw_detail": (
+            detail.get("raw_detail")
+            if isinstance(detail.get("raw_detail"), (dict, list))
+            else _clean(
+                detail.get("raw_detail")
+                or monitor.get("raw_detail")
+                or detail.get("upstream_error")
+                or detail.get("raw_upstream_error")
+                or detail.get("raw_error")
+                or monitor.get("upstream_error")
+                or monitor.get("raw_upstream_error")
+                or monitor.get("raw_error")
+                or detail.get("upstream_text")
+                or detail.get("raw_upstream_message")
+            )
         ),
         "image_urls": image_urls,
         "attempts": attempts,

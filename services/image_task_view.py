@@ -198,7 +198,7 @@ def image_task_row(
     duration_ms = _non_negative_int_or_none(raw.get("duration_ms"))
     stage_code, stage_label = _stage(raw, status)
     error_code = _text(raw.get("error_code"))
-    public_error = _text(raw.get("public_error") or raw.get("error"))
+    public_error = _text(raw.get("public_error")) or _text(raw.get("error"))
 
     return {
         "id": _text(raw.get("id")),

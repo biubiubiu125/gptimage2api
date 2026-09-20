@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import random
 
 from services.image_failure import classify_image_exception, should_switch_image_account
-from services.image_queue.sanitization import safe_queue_error_message
+from services.image_queue.sanitization import original_queue_error_message
 from services.image_queue.settings import ImageQueueSettings
 from services.image_queue.types import JobStage, RetryDecision
 
@@ -39,7 +39,7 @@ class RetryPolicy:
             "unsupported_model",
         }:
             transient = False
-        error_message = safe_queue_error_message(error, failure)
+        error_message = original_queue_error_message(error, failure)
         if not transient or used >= self._budget(resolved_stage):
             return RetryDecision(False, error_code=failure.code, error_message=error_message)
         delay = min(300.0, 5.0 * (3 ** (used - 1))) + self.random.uniform(0.0, 1.0)

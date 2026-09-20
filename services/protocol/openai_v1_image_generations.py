@@ -14,10 +14,10 @@ from utils.image_tokens import count_image_output_items_tokens, image_usage
 def _require_durable(body: dict[str, Any]) -> None:
     if not durable_image.has_durable_context(body):
         raise ImageGenerationError(
-            "durable image task context is required",
+            "图片生成必须走持久化图片队列。",
             failure=image_failure(
                 "durable_context_required",
-                raw_detail="image requests must enter the PostgreSQL durable queue",
+                raw_detail="图片请求必须进入 PostgreSQL 持久化图片队列。",
             ),
         )
 

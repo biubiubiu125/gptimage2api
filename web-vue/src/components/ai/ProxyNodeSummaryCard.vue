@@ -9,7 +9,7 @@
         {{ isEnabled ? '启用' : '停用' }}
       </span>
     </div>
-    <p class="proxy-node-summary-card__url">{{ maskedUrl || emptyText }}</p>
+    <p class="proxy-node-summary-card__url">{{ displayUrl || emptyText }}</p>
     <p class="proxy-node-summary-card__meta">图片并发 {{ imageLimit > 0 ? imageLimit : '不限' }}</p>
   </article>
 </template>
@@ -28,13 +28,7 @@ const props = withDefaults(defineProps<{
 const isEnabled = computed(() => props.node.enabled !== false)
 const displayName = computed(() => props.node.name || props.node.id)
 const imageLimit = computed(() => Math.max(0, Number(props.node.image_concurrency_limit || 0)))
-const maskedUrl = computed(() => maskProxy(props.node.url))
-
-function maskProxy(value: unknown) {
-  const raw = String(value || '').trim()
-  if (!raw) return ''
-  return raw.replace(/:\/\/([^/@:]+):([^/@]+)@/, (_match, user) => `://${user}:***@`)
-}
+const displayUrl = computed(() => String(props.node.url || '').trim())
 </script>
 
 <style scoped>

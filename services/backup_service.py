@@ -400,6 +400,10 @@ class BackupService:
             except BackupError:
                 raise
             except Exception as exc:
+                from services.image_queue.repository import TaskStateConflict
+
+                if isinstance(exc, TaskStateConflict):
+                    raise BackupError(exc.public_message) from exc
                 raise BackupError(str(exc)) from exc
             finally:
                 try:
@@ -489,10 +493,7 @@ class BackupService:
         ])
 
     def get_settings(self) -> dict[str, object]:
-        settings = dict(config.get_backup_settings())
-        settings["secret_access_key"] = "********" if _clean(settings.get("secret_access_key")) else ""
-        settings["passphrase"] = "********" if _clean(settings.get("passphrase")) else ""
-        return settings
+        return dict(config.get_backup_settings())
 
     def update_settings(self, payload: dict[str, object]) -> dict[str, object]:
         current = config.get_backup_settings()
@@ -601,7 +602,7 @@ class BackupService:
             if database_backend != current_backend:
                 raise BackupError(
                     f"备份数据库类型 {database_backend or 'unknown'} "
-                    f"与当前 Application Database 类型 {current_backend} 不一致"
+                    f"与当前应用数据库类型 {current_backend} 不一致"
                 )
             database_name = (
                 "data/application-database.sqlite3"
@@ -610,7 +611,7 @@ class BackupService:
             )
             database_source = staging / database_name
             if not database_source.is_file():
-                raise BackupError(f"备份缺少 Application Database：{database_name}")
+                raise BackupError(f"备份缺少应用数据库：{database_name}")
 
             queue_settings = metadata.get("image_queue_database")
             queue_included = isinstance(queue_settings, dict) and bool(queue_settings.get("included"))
@@ -632,7 +633,7 @@ class BackupService:
                 self._restore_postgresql_database(
                     queue_source,
                     queue_database_url,
-                    "Image Queue Store",
+                    "图片队列存储",
                 )
                 restored["image_queue"] = True
                 from services.image_queue.recovery import mark_queue_restore_needs_reclaim
@@ -640,7 +641,7 @@ class BackupService:
             if database_backend == "sqlite":
                 self._restore_sqlite_database(database_source, self._repository.database_url)
             elif database_backend == "postgresql":
-                self._restore_postgresql_database(database_source, self._repository.database_url, "Application Database")
+                self._restore_postgresql_database(database_source, self._repository.database_url, "应用数据库")
             else:
                 raise BackupError(f"不支持恢复数据库类型：{database_backend or 'unknown'}")
             restored["application_database"] = True
@@ -808,7 +809,7 @@ class BackupService:
         url = make_url(database_url)
         database_path = _clean(url.database)
         if not database_path or database_path == ":memory:":
-            raise BackupError("SQLite Application Database 必须是文件数据库")
+            raise BackupError("SQLite 应用数据库必须是文件数据库")
         target = Path(database_path).expanduser()
         if not target.is_absolute():
             target = Path.cwd() / target
@@ -955,7 +956,7 @@ class BackupService:
     def _validate_backup_security(settings: dict[str, object]) -> None:
         if not bool(settings.get("encrypt")):
             raise BackupError(
-                "备份包含 Application Database、Image Queue Store 与注册状态等敏感数据，"
+                "备份包含应用数据库、图片队列存储与注册状态等敏感数据，"
                 "必须启用备份加密"
             )
         if not _clean(settings.get("passphrase")):
@@ -1095,10 +1096,10 @@ class BackupService:
         try:
             settings = ImageQueueSettings.from_env()
         except ImageQueueConfigurationError as exc:
-            raise BackupError(f"Image Queue Store 配置无效：{exc}") from exc
+            raise BackupError(f"图片队列存储配置无效：{exc}") from exc
         if not settings.database_url:
             raise BackupError(
-                "Image Queue Store 未配置 PostgreSQL，无法创建完整备份"
+                "图片队列存储未配置 PostgreSQL，无法创建完整备份"
             )
         return settings.database_url
 
@@ -1146,7 +1147,7 @@ class BackupService:
                 destination.close()
             return Path(temporary_path).read_bytes()
         except Exception as exc:
-            raise BackupError("创建 SQLite Application Database 快照失败") from exc
+            raise BackupError("创建 SQLite 应用数据库快照失败") from exc
         finally:
             raw_connection.close()
             if temporary_path:

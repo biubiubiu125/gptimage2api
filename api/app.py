@@ -23,6 +23,7 @@ from services.genbox_push_service import (
 )
 from services.image_task_service import image_task_service
 from services.log_service import log_service
+from services.protocol.error_response import BACKUP_RESTORE_IN_PROGRESS_PUBLIC_MESSAGE
 from services.realtime_monitor_service import realtime_monitor_service
 from services.register_service import register_service
 from services.retention_cleanup_service import retention_cleanup_coordinator, start_retention_cleanup_scheduler
@@ -409,7 +410,7 @@ def create_app() -> FastAPI:
                     status_code=503,
                     content={
                         "error": {
-                            "message": "Service is restoring a backup. Please retry after the process restarts.",
+                            "message": BACKUP_RESTORE_IN_PROGRESS_PUBLIC_MESSAGE,
                             "type": "server_error",
                             "code": "backup_restore_in_progress",
                         }
@@ -453,7 +454,7 @@ def create_app() -> FastAPI:
     async def serve_web(full_path: str):
         asset = resolve_web_asset(full_path)
         if asset is None:
-            raise HTTPException(status_code=404, detail="Not Found")
+            raise HTTPException(status_code=404, detail="找不到该页面。")
         return FileResponse(asset)
 
     return app

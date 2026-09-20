@@ -20,7 +20,7 @@ from starlette.datastructures import UploadFile
 
 from services.browser_fingerprint import CHROME146_USER_AGENT, chrome146_headers
 from services.image_delivery import _is_local_or_private_host
-from services.image_failure import public_image_url_fetch_error_message
+from services.image_failure import wrap_public_http_detail, public_image_url_fetch_error_message
 from services.proxy_service import proxy_settings
 
 ImageInput = tuple[bytes, str, str]
@@ -35,6 +35,19 @@ IMAGE_REFERENCE_FIELDS = {"image", "image[]", "images", "images[]", "image_url",
 MASK_REFERENCE_FIELDS = {"mask", "mask[]"}
 
 _IMAGE_FETCH_SLOTS = threading.BoundedSemaphore(IMAGE_FETCH_CONCURRENCY)
+
+
+def _wrap_input_detail(detail: object) -> object:
+    return wrap_public_http_detail(detail, stage="请求参数")
+
+
+class _PublicInputHTTPException(HTTPException):
+    def __init__(self, status_code: int, detail: object = None, headers=None) -> None:
+        super().__init__(
+            status_code=status_code,
+            detail=_wrap_input_detail(detail),
+            headers=headers,
+        )
 
 
 def _clean(value: object, default: str = "") -> str:
@@ -59,7 +72,7 @@ def _parse_bool(value: object) -> bool | None:
         return True
     if text in {"false", "0", "no", "n", "off"}:
         return False
-    raise HTTPException(status_code=400, detail={"error": "stream must be a boolean"})
+    raise _PublicInputHTTPException(status_code=400, detail={"error": "流式参数必须是布尔值。"})
 
 
 def _parse_count(value: object) -> int:
@@ -67,9 +80,9 @@ def _parse_count(value: object) -> int:
     try:
         count = int(value or 1)
     except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail={"error": "n must be an integer"}) from exc
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "生成数量必须是整数。"}) from exc
     if count < 1 or count > 4:
-        raise HTTPException(status_code=400, detail={"error": "n must be between 1 and 4"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "生成数量必须在 1 到 4 之间。"})
     return count
 
 
@@ -79,15 +92,15 @@ def _validate_source_count(
 ) -> None:
     """校验图片编辑来源数量，避免空请求和超出统一输入上限。"""
     if not image_sources:
-        raise HTTPException(
+        raise _PublicInputHTTPException(
             status_code=400,
-            detail={"error": "image file or image_url is required"},
+            detail={"error": "必须提供图片文件或参考图地址。"},
         )
     total = len(image_sources) + len(mask_sources)
     if total > MAX_IMAGE_INPUTS:
-        raise HTTPException(
+        raise _PublicInputHTTPException(
             status_code=400,
-            detail={"error": f"too many image inputs; maximum is {MAX_IMAGE_INPUTS}"},
+            detail={"error": f"图片输入数量过多，最多 {MAX_IMAGE_INPUTS} 张"},
         )
 
 
@@ -95,7 +108,7 @@ def _payload_from_fields(fields: dict[str, Any]) -> dict[str, Any]:
     """构造图片编辑载荷：从表单或 JSON 字段提取通用参数。"""
     prompt = _clean(fields.get("prompt"))
     if not prompt:
-        raise HTTPException(status_code=400, detail={"error": "prompt is required"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "必须提供提示词。"})
     payload = {
         "prompt": prompt,
         "model": _clean(fields.get("model"), "gpt-image-2"),
@@ -128,15 +141,15 @@ def _decode_base64_image(value: object, filename: str, mime_type: str) -> ImageI
     # Reject obviously oversized payloads before base64 decoding allocates a
     # second copy of the input in memory.
     if len(encoded) > ((MAX_IMAGE_REFERENCE_BYTES + 2) // 3) * 4 + 4:
-        raise HTTPException(status_code=400, detail={"error": "image URL exceeds 50MB limit"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图大小超过 50MB 限制。"})
     try:
         data = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise HTTPException(status_code=400, detail={"error": "invalid base64 image data"}) from exc
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "Base64 图片数据无效。"}) from exc
     if not data:
-        raise HTTPException(status_code=400, detail={"error": "image file is empty"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "图片文件为空。"})
     if len(data) > MAX_IMAGE_REFERENCE_BYTES:
-        raise HTTPException(status_code=400, detail={"error": "image URL exceeds 50MB limit"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图大小超过 50MB 限制。"})
     return data, filename, mime_type
 
 
@@ -144,9 +157,9 @@ def _source_from_object(value: dict[str, Any]) -> list[ImageSource]:
     """提取图片引用对象：支持 image_url 或 url，明确拒绝 file_id。"""
     has_url = "image_url" in value or "url" in value
     if value.get("file_id"):
-        raise HTTPException(
+        raise _PublicInputHTTPException(
             status_code=400,
-            detail={"error": "file_id image references are not supported; use image_url instead"},
+            detail={"error": "不支持 file_id 参考图，请改用参考图地址。"},
         )
     inline = value.get("b64_json") or value.get("base64")
     if inline:
@@ -154,7 +167,7 @@ def _source_from_object(value: dict[str, Any]) -> list[ImageSource]:
         mime_type = _clean(value.get("mime_type") or value.get("mimeType"), "image/png")
         return [_decode_base64_image(inline, filename, mime_type)]
     if not has_url:
-        raise HTTPException(status_code=400, detail={"error": "image reference must include image_url"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图必须包含图片地址。"})
     image_url = value.get("image_url", value.get("url"))
     if isinstance(image_url, dict):
         image_url = image_url.get("url")
@@ -182,7 +195,7 @@ def _sources_from_value(value: object) -> list[ImageSource]:
         return _source_from_object(value)
     if value is None:
         return []
-    raise HTTPException(status_code=400, detail={"error": "invalid image reference"})
+    raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图格式无效"})
 
 
 def _json_image_sources(body: dict[str, Any]) -> list[ImageSource]:
@@ -212,9 +225,9 @@ async def parse_image_edit_request(request: Request) -> tuple[dict[str, Any], li
         try:
             body = await request.json()
         except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail={"error": "invalid JSON body"}) from exc
+            raise _PublicInputHTTPException(status_code=400, detail={"error": "JSON 请求体无效。"}) from exc
         if not isinstance(body, dict):
-            raise HTTPException(status_code=400, detail={"error": "JSON body must be an object"})
+            raise _PublicInputHTTPException(status_code=400, detail={"error": "JSON 请求体必须是对象。"})
         return _payload_from_fields(body), _json_image_sources(body), _json_mask_sources(body)
 
     form = await request.form()
@@ -302,7 +315,7 @@ def image_edit_source_request_hash(
 
 def _image_size_error(max_bytes: int) -> str:
     limit_mb = max(1, (max(1, int(max_bytes)) + 1024 * 1024 - 1) // (1024 * 1024))
-    return f"image URL exceeds {limit_mb}MB limit"
+    return f"参考图大小超过 {limit_mb}MB 限制。"
 
 
 def _decode_data_url(
@@ -314,24 +327,24 @@ def _decode_data_url(
     limit = max(1, int(max_bytes))
     header, separator, payload = url.partition(",")
     if not separator:
-        raise HTTPException(status_code=400, detail={"error": "invalid data image URL"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "内嵌图片地址无效。"})
     mime_type = header.split(";", 1)[0].removeprefix("data:") or "image/png"
     if not mime_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail={"error": "image_url must point to an image"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图地址必须指向图片。"})
     if ";base64" in header:
         encoded_limit = ((limit + 2) // 3) * 4 + 4
     else:
         encoded_limit = limit * 4
     if len(payload) > encoded_limit:
-        raise HTTPException(status_code=400, detail=_image_size_error(limit))
+        raise _PublicInputHTTPException(status_code=400, detail=_image_size_error(limit))
     try:
         data = base64.b64decode(payload, validate=True) if ";base64" in header else unquote_to_bytes(payload)
     except (binascii.Error, ValueError) as exc:
-        raise HTTPException(status_code=400, detail={"error": "invalid data image URL"}) from exc
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "内嵌图片地址无效。"}) from exc
     if not data:
-        raise HTTPException(status_code=400, detail={"error": "image URL is empty"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "图片地址为空。"})
     if len(data) > limit:
-        raise HTTPException(status_code=400, detail=_image_size_error(limit))
+        raise _PublicInputHTTPException(status_code=400, detail=_image_size_error(limit))
     return data, f"image_url.{_extension_from_mime(mime_type)}", mime_type
 
 
@@ -342,12 +355,12 @@ def _response_mime_type(response: requests.Response, parsed_path: str) -> str:
     if header_type.startswith("image/"):
         return header_type
     if header_type and header_type not in {"application/octet-stream", "binary/octet-stream"}:
-        raise HTTPException(status_code=400, detail={"error": "image_url must point to an image"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图地址必须指向图片。"})
     if guessed_type.startswith("image/"):
         return guessed_type
     if not header_type or header_type in {"application/octet-stream", "binary/octet-stream"}:
         return "image/png"
-    raise HTTPException(status_code=400, detail={"error": "image_url must point to an image"})
+    raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图地址必须指向图片。"})
 
 
 def _filename_from_url(parsed_path: str, mime_type: str) -> str:
@@ -366,19 +379,19 @@ def _validate_public_image_url(source: str) -> tuple[ParseResult, tuple[str, ...
     """
     parsed = urlparse(source)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise HTTPException(status_code=400, detail={"error": "image_url must be an http or https URL"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图地址必须是 http 或 https。"})
     if parsed.username or parsed.password:
-        raise HTTPException(status_code=400, detail={"error": "image_url must not include credentials"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图地址不能包含用户名或密码。"})
     try:
         hostname = parsed.hostname
         port = parsed.port
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail={"error": "invalid image_url host"}) from exc
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图主机名无效。"}) from exc
     if not hostname:
-        raise HTTPException(status_code=400, detail={"error": "invalid image_url host"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图主机名无效。"})
     normalized_host = hostname.rstrip(".").lower()
     if _is_local_or_private_host(normalized_host):
-        raise HTTPException(status_code=400, detail={"error": "image_url host is not publicly reachable"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图主机无法公开访问。"})
     try:
         literal = ipaddress.ip_address(normalized_host)
     except ValueError:
@@ -390,9 +403,9 @@ def _validate_public_image_url(source: str) -> tuple[ParseResult, tuple[str, ...
         try:
             addresses = [item[4][0] for item in socket.getaddrinfo(normalized_host, port, type=socket.SOCK_STREAM)]
         except OSError as exc:
-            raise HTTPException(status_code=400, detail={"error": "image_url host could not be resolved"}) from exc
+            raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图主机无法解析。"}) from exc
     if not addresses or any(_is_local_or_private_host(address) for address in addresses):
-        raise HTTPException(status_code=400, detail={"error": "image_url host is not publicly reachable"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图主机无法公开访问。"})
     return parsed, tuple(dict.fromkeys(addresses))
 
 
@@ -434,7 +447,7 @@ def _read_response_limited(
                     chunk_bytes = bytes(chunk)
                     total += len(chunk_bytes)
                     if total > limit:
-                        raise HTTPException(status_code=400, detail=_image_size_error(limit))
+                        raise _PublicInputHTTPException(status_code=400, detail=_image_size_error(limit))
                     data.extend(chunk_bytes)
             except TypeError:
                 # Lightweight response doubles often expose ``content`` but
@@ -445,16 +458,16 @@ def _read_response_limited(
                 # that return no chunks even though ``content`` is populated.
                 data = bytearray(bytes(response.content))
             if len(data) > limit:
-                raise HTTPException(status_code=400, detail=_image_size_error(limit))
+                raise _PublicInputHTTPException(status_code=400, detail=_image_size_error(limit))
         else:
             data = bytes(response.content)
             if len(data) > limit:
-                raise HTTPException(status_code=400, detail=_image_size_error(limit))
+                raise _PublicInputHTTPException(status_code=400, detail=_image_size_error(limit))
             return data
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(
+        raise _PublicInputHTTPException(
             status_code=400,
             detail={"error": public_image_url_fetch_error_message(exc)},
         ) from exc
@@ -479,7 +492,7 @@ def _download_image_url(
         try:
             acquired = _IMAGE_FETCH_SLOTS.acquire(timeout=60)
             if not acquired:
-                raise TimeoutError("image fetch concurrency limit reached")
+                raise TimeoutError("参考图下载并发超限，请稍后重试。")
             request_kwargs = proxy_settings.build_session_kwargs(
                 resource=True,
                 upstream=True,
@@ -510,27 +523,27 @@ def _download_image_url(
         except Exception as exc:
             if acquired:
                 _IMAGE_FETCH_SLOTS.release()
-            raise HTTPException(
+            raise _PublicInputHTTPException(
                 status_code=400,
                 detail={"error": public_image_url_fetch_error_message(exc)},
             ) from exc
         try:
             if 300 <= response.status_code < 400:
                 if redirect_count >= MAX_IMAGE_REDIRECTS:
-                    raise HTTPException(status_code=400, detail={"error": "image_url has too many redirects"})
+                    raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图重定向次数过多。"})
                 location = _clean(response.headers.get("location"))
                 if not location:
-                    raise HTTPException(status_code=400, detail={"error": "image_url redirect is missing a location"})
+                    raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图重定向缺少跳转地址。"})
                 current = urljoin(current, location)
                 continue
             if not 200 <= response.status_code < 300:
-                raise HTTPException(status_code=400, detail={"error": f"image_url fetch failed: HTTP {response.status_code}"})
+                raise _PublicInputHTTPException(status_code=400, detail={"error": f"参考图下载失败（HTTP {response.status_code}）。"})
             content_length = _clean(response.headers.get("content-length"))
             if content_length and content_length.isdigit() and int(content_length) > limit:
-                raise HTTPException(status_code=400, detail={"error": _image_size_error(limit)})
+                raise _PublicInputHTTPException(status_code=400, detail={"error": _image_size_error(limit)})
             data = _read_response_limited(response, max_bytes=limit)
             if not data:
-                raise HTTPException(status_code=400, detail={"error": "image_url returned empty content"})
+                raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图返回了空内容。"})
             mime_type = _response_mime_type(response, parsed.path)
             return data, _filename_from_url(parsed.path, mime_type), mime_type
         finally:
@@ -540,13 +553,13 @@ def _download_image_url(
                     close()
             finally:
                 _IMAGE_FETCH_SLOTS.release()
-    raise HTTPException(status_code=400, detail={"error": "image_url has too many redirects"})
+    raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图重定向次数过多。"})
 
 
 async def read_image_sources(sources: list[ImageSource]) -> list[ImageInput]:
     """读取图片来源：上传文件直接读取，URL 下载后统一返回图片元组。"""
     if len(sources) > MAX_IMAGE_INPUTS:
-        raise HTTPException(status_code=400, detail={"error": f"at most {MAX_IMAGE_INPUTS} image inputs are supported"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": f"最多支持 {MAX_IMAGE_INPUTS} 张参考图"})
     images: list[ImageInput] = []
     total_bytes = 0
 
@@ -554,10 +567,10 @@ async def read_image_sources(sources: list[ImageSource]) -> list[ImageInput]:
         nonlocal total_bytes
         image_bytes = len(image[0])
         if image_bytes > MAX_IMAGE_REFERENCE_BYTES:
-            raise HTTPException(status_code=400, detail={"error": "image input exceeds 50MB limit"})
+            raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图大小超过 50MB 限制。"})
         total_bytes += image_bytes
         if total_bytes > MAX_IMAGE_INPUT_BYTES:
-            raise HTTPException(status_code=400, detail={"error": "combined image inputs exceed 100MB limit"})
+            raise _PublicInputHTTPException(status_code=400, detail={"error": "参考图合计大小超过 100MB 限制。"})
         images.append(image)
 
     for source in sources:
@@ -574,18 +587,18 @@ async def read_image_sources(sources: list[ImageSource]) -> list[ImageInput]:
                         break
                     upload_size += len(chunk)
                     if upload_size > MAX_IMAGE_REFERENCE_BYTES:
-                        raise HTTPException(status_code=400, detail={"error": "image file exceeds 50MB limit"})
+                        raise _PublicInputHTTPException(status_code=400, detail={"error": "图片文件大小超过 50MB 限制。"})
                     image_data.extend(chunk)
             finally:
                 await source.close()
             image_data = bytes(image_data)
             if not image_data:
-                raise HTTPException(status_code=400, detail={"error": "image file is empty"})
+                raise _PublicInputHTTPException(status_code=400, detail={"error": "图片文件为空。"})
             append_image((image_data, source.filename or "image.png", source.content_type or "image/png"))
             continue
         append_image(await run_in_threadpool(_download_image_url, source))
     if not images:
-        raise HTTPException(status_code=400, detail={"error": "image file or image_url is required"})
+        raise _PublicInputHTTPException(status_code=400, detail={"error": "必须提供图片文件或参考图地址。"})
     return images
 
 

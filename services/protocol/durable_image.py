@@ -6,7 +6,18 @@ import time
 from typing import Any, Iterator, Mapping
 from urllib.parse import urlsplit
 
-from services.image_failure import ImageGenerationError, classify_image_exception, image_failure
+from services.image_failure import (
+    IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE,
+    IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE,
+    IMAGE_TASK_PENDING_PUBLIC_MESSAGE,
+    ImageGenerationError,
+    classify_image_exception,
+    image_failure,
+    is_formatted_public_chinese_error,
+    public_error_original,
+    public_image_error_message,
+)
+from services.image_queue.artifact_service import InvalidImageArtifact
 from services.image_delivery import is_url_only_result
 from services.image_task_service import image_task_service
 from services.protocol.conversation import ImageOutput
@@ -21,10 +32,10 @@ def normalize_response_format(value: object, default: str = "b64_json") -> str:
     response_format = str(value or default).strip() or default
     if response_format not in _ALLOWED_RESPONSE_FORMATS:
         raise ImageGenerationError(
-            "response_format must be one of: b64_json, url",
+            "response_format 只支持 b64_json 或 url。",
             failure=image_failure(
                 "invalid_image_input",
-                raw_detail=f"unsupported response_format: {response_format}",
+                raw_detail=f"不支持的 response_format：{response_format}",
             ),
         )
     return response_format
@@ -54,18 +65,27 @@ def _task_error(exc: Exception, task_id: str) -> ImageGenerationError:
         if not exc.task_id and resolved_task_id:
             exc.task_id = resolved_task_id
         return exc
-    failure = (
-        image_failure("image_task_pending", raw_detail="image task is still running")
-        if isinstance(exc, TimeoutError)
-        else classify_image_exception(exc)
-    )
     if isinstance(exc, TimeoutError):
-        message = (
-            "image task is still running; poll /api/image-tasks/{task_id} or "
-            "retry with the same idempotency key"
+        return ImageGenerationError(
+            IMAGE_TASK_PENDING_PUBLIC_MESSAGE,
+            failure=image_failure(
+                "image_task_pending",
+                raw_detail=IMAGE_TASK_PENDING_PUBLIC_MESSAGE,
+            ),
+            task_id=resolved_task_id,
         )
-    else:
-        message = str(exc or "image task failed")
+    if isinstance(exc, InvalidImageArtifact):
+        return _unavailable_image_result_error(str(exc or "").strip(), resolved_task_id)
+    if str(exc or "").strip() == IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE:
+        failure = image_failure("image_task_not_found")
+        return ImageGenerationError(
+            IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE,
+            failure=failure,
+            raw_error=IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE,
+            task_id=resolved_task_id,
+        )
+    failure = classify_image_exception(exc)
+    message = str(exc or "图片任务失败。")
     return ImageGenerationError(message, failure=failure, task_id=resolved_task_id)
 
 
@@ -76,10 +96,10 @@ def has_durable_context(body: Mapping[str, Any]) -> bool:
 def _context(body: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, object]]:
     context = body.get("_image_task_context")
     if not isinstance(context, dict):
-        raise ValueError("durable image task context is required")
+        raise ValueError("图片生成必须走持久化图片队列。")
     identity = context.get("identity")
     if not isinstance(identity, dict):
-        raise ValueError("durable image task identity is required")
+        raise ValueError("图片任务身份信息无效。")
     return context, identity
 
 
@@ -101,7 +121,7 @@ def _submit(
     trace_headers = dict(context.get("trace_headers") or {}) if isinstance(context.get("trace_headers"), dict) else {}
     call_id = str(body.get("_call_id") or "").strip()
     if call_id:
-        trace_headers["call_id"] = call_id[:160]
+        trace_headers["call_id"] = call_id
     submitted = image_task_service.submit_protocol_request(
         identity,
         request_payload,
@@ -129,7 +149,7 @@ def _submission(
         response_format,
     )
     if not task_id:
-        raise RuntimeError("durable image task submission did not return a task id")
+        raise RuntimeError("提交图片任务后没有返回任务 ID。")
     submitted = {
         "identity": identity,
         "request_payload": request_payload,
@@ -144,6 +164,40 @@ def _submission(
 def _raise_after_response_attempt(identity: Mapping[str, object], task_id: str, error: ImageGenerationError) -> None:
     image_task_service.mark_response_attempted(identity, task_id)
     raise error
+
+
+def _unavailable_image_result_error(original: str, task_id: str = "") -> ImageGenerationError:
+    detail = str(original or "").strip()
+    return ImageGenerationError(
+        public_image_error_message(image_failure("invalid_image_result")),
+        failure=image_failure("invalid_image_result", raw_detail=detail),
+        raw_error=detail,
+        task_id=task_id,
+    )
+
+
+def _invalid_image_result_error(
+    identity: Mapping[str, object],
+    task_id: str,
+    reason: str,
+    *,
+    item: Mapping[str, Any] | None = None,
+    extra: str = "",
+) -> None:
+    parts = [reason]
+    if extra:
+        parts.append(extra)
+    if isinstance(item, Mapping):
+        for key in ("relative_path", "url", "width", "height", "checksum", "sha256"):
+            value = item.get(key)
+            if value not in (None, ""):
+                parts.append(f"{key}={value}")
+    original = " ".join(str(part) for part in parts if str(part).strip())
+    _raise_after_response_attempt(
+        identity,
+        task_id,
+        _unavailable_image_result_error(original, task_id),
+    )
 
 
 async def prepare_submission(
@@ -194,8 +248,16 @@ def _result(
     status = str(terminal.get("status") or "")
     required = int(terminal.get("required_jobs") or 0)
     succeeded = int(terminal.get("succeeded_jobs") or 0)
-    error_code = str(terminal.get("error_code") or "image_job_failed")
-    error_message = str(terminal.get("error") or terminal.get("error_message") or "image generation failed")
+    error_code = str(terminal.get("error_code") or "").strip()
+    public_error = str(terminal.get("public_error") or "").strip()
+    legacy_error = str(terminal.get("error") or terminal.get("error_message") or "").strip()
+    if is_formatted_public_chinese_error(public_error):
+        error_message = public_error
+    elif is_formatted_public_chinese_error(legacy_error):
+        error_message = legacy_error
+    else:
+        error_message = legacy_error or public_error or "图片生成失败。"
+    admin_error = str(terminal.get("_admin_error") or "").strip() or public_error_original(error_message) or error_message
     # The task service returns the public projection here. A terminal task
     # with retained results is exposed as "partial_success" when some
     # requested jobs failed.
@@ -207,7 +269,8 @@ def _result(
         image_task_service.mark_response_attempted(identity, task_id)
         raise ImageGenerationError(
             error_message,
-            failure=image_failure(error_code, raw_detail=error_message),
+            failure=image_failure(error_code, raw_detail=admin_error),
+            raw_error=admin_error,
             task_id=task_id,
         )
     if (
@@ -220,7 +283,8 @@ def _result(
         image_task_service.mark_response_attempted(identity, task_id)
         raise ImageGenerationError(
             error_message,
-            failure=image_failure(error_code, raw_detail=error_message),
+            failure=image_failure(error_code or "image_job_failed", raw_detail=admin_error),
+            raw_error=admin_error,
             task_id=task_id,
         )
 
@@ -233,14 +297,11 @@ def _result(
         width = int(raw_item.get("width") or 0)
         height = int(raw_item.get("height") or 0)
         if width <= 0 or height <= 0:
-            _raise_after_response_attempt(
+            _invalid_image_result_error(
                 identity,
                 task_id,
-                ImageGenerationError(
-                    "saved image dimensions are unavailable",
-                    failure=image_failure("invalid_image_result"),
-                    task_id=task_id,
-                ),
+                "已保存的图片缺少尺寸。",
+                item=raw_item,
             )
         item = {
             "revised_prompt": str(raw_item.get("revised_prompt") or request_payload.get("prompt") or ""),
@@ -262,14 +323,11 @@ def _result(
             continue
         if response_format != "b64_json" and is_url_only_result(raw_item):
             if not url:
-                _raise_after_response_attempt(
+                _invalid_image_result_error(
                     identity,
                     task_id,
-                    ImageGenerationError(
-                        "saved image URL is unavailable",
-                        failure=image_failure("invalid_image_result"),
-                        task_id=task_id,
-                    ),
+                    "已保存的图片 URL 不可用。",
+                    item=raw_item,
                 )
             item["url"] = url
             image_urls.append(url)
@@ -291,38 +349,35 @@ def _result(
                     recover(identity, task_id)
                 except Exception:
                     pass
+            original = str(exc or "").strip() or IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE
             raise ImageGenerationError(
-                "saved image artifact is being repaired",
+                IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE,
                 failure=image_failure(
-                    "image_task_pending",
-                    raw_detail=str(exc or "saved image artifact is unavailable"),
+                    "invalid_image_result",
+                    raw_detail=original,
                 ),
+                raw_error=original,
                 task_id=task_id,
             ) from exc
         if response_format == "b64_json":
             item["b64_json"] = base64.b64encode(payload_bytes).decode("ascii")
         else:
             if not url:
-                _raise_after_response_attempt(
+                _invalid_image_result_error(
                     identity,
                     task_id,
-                    ImageGenerationError(
-                        "saved image URL is unavailable",
-                        failure=image_failure("invalid_image_result"),
-                        task_id=task_id,
-                    ),
+                    "已保存的图片 URL 不可用。",
+                    item=raw_item,
                 )
             expected_path = f"/images/{relative_path.lstrip('/')}".rstrip("/")
             parsed_url = urlsplit(url)
             if parsed_url.path.rstrip("/") != expected_path:
-                _raise_after_response_attempt(
+                _invalid_image_result_error(
                     identity,
                     task_id,
-                    ImageGenerationError(
-                        "saved image URL does not match its artifact path",
-                        failure=image_failure("invalid_image_result"),
-                        task_id=task_id,
-                    ),
+                    "已保存的图片 URL 与产物路径不一致。",
+                    item=raw_item,
+                    extra=f"expected_path={expected_path}",
                 )
             item["url"] = url
         if url:
@@ -334,7 +389,7 @@ def _result(
             identity,
             task_id,
             ImageGenerationError(
-                "durable image task returned incomplete results",
+                "图片任务返回的结果不完整。",
                 failure=image_failure("image_job_failed"),
                 task_id=task_id,
             ),
@@ -468,7 +523,6 @@ _PROGRESS_SNAPSHOT_FIELDS = (
     "progress",
     "queue_position",
     "estimated_wait_seconds",
-    "wait_reason",
     "succeeded_jobs",
     "failed_jobs",
     "required_jobs",
@@ -555,7 +609,7 @@ def stream_outputs(
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise _task_error(TimeoutError("image task is still running"), task_id)
+            raise _task_error(TimeoutError(IMAGE_TASK_PENDING_PUBLIC_MESSAGE), task_id)
         try:
             terminal = _wait_for_terminal_from_worker_thread(
                 identity,
@@ -564,7 +618,7 @@ def stream_outputs(
             )
         except TimeoutError:
             if time.monotonic() >= deadline:
-                raise _task_error(TimeoutError("image task is still running"), task_id)
+                raise _task_error(TimeoutError(IMAGE_TASK_PENDING_PUBLIC_MESSAGE), task_id)
             yield ImageOutput(
                 kind="progress",
                 model=model,

@@ -118,7 +118,7 @@ def ensure_thumbnail(relative_path: str) -> Path:
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=422, detail="failed to create thumbnail") from exc
+        raise HTTPException(status_code=422, detail="缩略图生成失败。") from exc
     return target
 
 
@@ -326,7 +326,7 @@ def delete_images(paths: list[str] | None = None, start_date: str = "", end_date
             for item in queue_targets:
                 assert queue_service is not None
                 if not queue_service.delete_public_final_artifact(item):
-                    raise ImageStorageError("queue image deletion was not completed")
+                    raise ImageStorageError("队列图片删除未完成。")
                 removed_paths.add(item)
                 completed_targets.append(item)
             if legacy_targets:
@@ -450,7 +450,7 @@ def delete_to_target(target_free_mb: int, dry_run: bool = False) -> dict:
             if not dry_run:
                 assert queue_service is not None
                 if not queue_service.delete_public_final_artifact(rel):
-                    raise ImageStorageError("queue image deletion was not completed")
+                    raise ImageStorageError("队列图片删除未完成。")
             removals.append(LocalCopyRemoval(rel=rel, size=size, remote_remains=False))
             reclaimed += size
             continue

@@ -125,7 +125,7 @@ def _credential_lifecycle(account: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _diagnostic(value: object, account: dict[str, Any], limit: int = 500) -> str:
+def _diagnostic(value: object, account: dict[str, Any], limit: int = 0) -> str:
     return sanitize_diagnostic_text(
         value,
         sensitive_values=(
@@ -222,9 +222,8 @@ def _proxy(account: dict[str, Any]) -> tuple[str, str, str, str]:
         legacy_group_id=account.get("proxy_group_id"),
     )
     mode = "custom" if projection.mode == "profile" else projection.mode
-    safe_reference = "custom" if projection.mode == "custom" else projection.reference
     return (
-        safe_reference,
+        projection.reference,
         mode,
         projection.group_id,
         projection.label,
@@ -289,6 +288,8 @@ def account_row(
         "enabled_action_label": "停用账号" if enabled_action == "disable" else "恢复启用",
         "available": bool(available),
         **credential_lifecycle,
+        "access_token": _text(account.get("access_token")),
+        "refresh_token": _text(account.get("refresh_token")),
         "quota_remaining": quota_remaining,
         "quota_unknown": quota_unknown,
         "quota_unlimited": bool(unlimited_quota),

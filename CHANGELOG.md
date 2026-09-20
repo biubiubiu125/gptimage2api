@@ -2,6 +2,8 @@
 
 ## Unreleased
 
++ [修复] 公开生图失败改为四段中文，管理端保留完整明文分栏。`/v1` 结果不可用原文不再带产物路径或 checksum；resume-poll 缺任务走 404；任务列表单条产物失败不再拖垮整页。
+
 ## 1.0.2 - 2026-09-18
 
 + [修复] 每次 `main` 发布升版本并自动生成 GitHub Release 更新包，控制台在线更新可用；Docker 镜像 `VERSION` 变化后会重灌运行目录。没升版本或更新包没发出去时不再推 GHCR `latest`；缺资产的 Release 会删掉重发；镜像同时打上 `VERSION` 标签。查询 Release 时只有 404 才算未发布，GitHub 限流或网络错误会挡住发布；latest Release 缺少更新包时控制台不显示可在线更新。

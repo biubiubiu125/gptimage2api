@@ -26,7 +26,7 @@ from utils.log import logger
 class ImageQueueStorageFullError(RuntimeError):
     code = "image_queue_storage_full"
 
-    def __init__(self, message: str = "image artifact storage is under disk pressure") -> None:
+    def __init__(self, message: str = "图片队列存储空间不足。") -> None:
         super().__init__(message)
         self.failure = image_failure(self.code, raw_detail=message).with_public_detail(message)
 
@@ -35,10 +35,10 @@ class ImageQueueResourcePressureError(RuntimeError):
     code = "image_queue_resource_pressure"
 
     def __init__(self, reason: str = "resource_pressure") -> None:
-        message = f"image queue is temporarily unavailable due to {reason}"
+        message = "图片队列暂时不可用。"
         super().__init__(message)
         self.reason = reason
-        self.failure = image_failure(self.code, raw_detail=message).with_public_detail(message)
+        self.failure = image_failure(self.code, raw_detail=reason).with_public_detail(message)
 
 
 class ResourceController:

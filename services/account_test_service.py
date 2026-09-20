@@ -151,7 +151,11 @@ class AccountTestService:
         backend: OpenAIBackendAPI | None = None
         with account_processing_slot():
             try:
-                backend = OpenAIBackendAPI(access_token=active_token)
+                backend = OpenAIBackendAPI(
+                    access_token=active_token,
+                    account=account,
+                    proxy=str(account.get("proxy") or ""),
+                )
                 text = "".join(
                     str(event.get("delta") or "")
                     for event in conversation_events(
@@ -186,7 +190,11 @@ class AccountTestService:
         backend: OpenAIBackendAPI | None = None
         with account_processing_slot():
             try:
-                backend = OpenAIBackendAPI(access_token=active_token)
+                backend = OpenAIBackendAPI(
+                    access_token=active_token,
+                    account=account,
+                    proxy=str(account.get("proxy") or ""),
+                )
                 request = ConversationRequest(
                     model=model,
                     prompt=prompt,

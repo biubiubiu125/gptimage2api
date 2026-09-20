@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Mapping
 
 
@@ -237,11 +236,7 @@ def _diagnostic_text(detail: Mapping[str, Any], key: str) -> str:
 
 
 def _masked_key_label(value: object) -> str:
-    return re.sub(
-        r"sk-[A-Za-z0-9_-]{6,}",
-        lambda match: f"{match.group(0)[:5]}***{match.group(0)[-4:]}",
-        _clean(value),
-    )
+    return _clean(value)
 
 
 def _time_range_text(summary: Mapping[str, Any]) -> str:

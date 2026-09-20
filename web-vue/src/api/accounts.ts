@@ -35,6 +35,8 @@ export interface Account {
   enabled_action: AccountEnabledAction
   enabled_action_label: string
   available: boolean
+  access_token?: string
+  refresh_token?: string
   access_token_status: AccountAccessTokenStatus
   access_token_label: string
   access_token_tone: AccountPresentationTone

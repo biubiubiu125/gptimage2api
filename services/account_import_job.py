@@ -296,7 +296,7 @@ class RemoteImportJobCoordinator:
                 if isinstance(item, dict)
             ):
                 raise RemoteImportJobConflictError(
-                    "an account import job is already running"
+                    "已有账号导入任务正在执行。"
                 )
 
             items = configurations.get(normalized_provider)

@@ -21,10 +21,17 @@ from services.image_failure import (
     ImageFailure,
     ImageGenerationError,
     classify_image_exception,
+    is_formatted_public_chinese_error,
     is_text_review_failure_code,
+    public_error_original,
+    public_error_reason,
     public_image_error_message,
 )
-from services.protocol.error_response import anthropic_error_response, openai_error_response
+from services.protocol.error_response import (
+    UPSTREAM_UNAVAILABLE_PUBLIC_MESSAGE,
+    anthropic_error_response,
+    openai_error_response,
+)
 from services.realtime_monitor_service import realtime_monitor_service
 from utils.diagnostics import (
     diagnostic_excerpt,
@@ -47,8 +54,8 @@ INTERNAL_RESPONSE_KEYS = {
 }
 LOG_IMAGE_URL_RE = re.compile(r"(?:!\[[^\]]*\]\()(?P<url>(?:https?://|/images/|/image-thumbnails/)[^\s)\"']+)\)")
 PERF_WAIT_WARN_MS = 1000
-REQUEST_TEXT_EXCERPT_LIMIT = 1000
-REQUEST_TEXT_FULL_LIMIT = 50000
+REQUEST_TEXT_EXCERPT_LIMIT = 0
+REQUEST_TEXT_FULL_LIMIT = 0
 
 LogService = CallRecordService
 LogCursorMismatch = CallRecordCursorMismatch
@@ -382,9 +389,9 @@ def _request_excerpt(text: object, limit: int = REQUEST_TEXT_EXCERPT_LIMIT) -> s
     if not value:
         return ""
     normalized = " ".join(value.split())
-    if len(normalized) <= limit:
-        return normalized
-    return normalized[: limit - 1].rstrip() + "…"
+    if limit > 0 and len(normalized) > limit:
+        return normalized[: limit - 1].rstrip() + "…"
+    return normalized
 
 
 def _request_full_text(text: object, limit: int = REQUEST_TEXT_FULL_LIMIT) -> tuple[str, bool]:
@@ -392,9 +399,57 @@ def _request_full_text(text: object, limit: int = REQUEST_TEXT_FULL_LIMIT) -> tu
     if not value:
         return "", False
     normalized = " ".join(value.split())
-    if len(normalized) <= limit:
+    if limit <= 0 or len(normalized) <= limit:
         return normalized, False
     return normalized[: limit - 1].rstrip() + "…", True
+
+
+def http_exception_public_message(exc: HTTPException) -> str:
+    detail = exc.detail
+    if isinstance(detail, dict):
+        error = detail.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or error.get("code") or "").strip()
+        return str(detail.get("message") or error or "").strip()
+    return str(detail or "").strip()
+
+
+def http_exception_admin_message(exc: HTTPException) -> str:
+    cause = str(exc.__cause__ or "").strip()
+    if cause:
+        return cause
+    public = http_exception_public_message(exc)
+    if not public:
+        return ""
+    if is_formatted_public_chinese_error(public):
+        original = public_error_original(public)
+        if original and original != public:
+            return original
+        return public_error_reason(public)
+    return public
+
+
+def http_exception_log_fields(exc: HTTPException) -> dict[str, object] | None:
+    fields: dict[str, object] = {}
+    public = http_exception_public_message(exc)
+    if public:
+        fields["public_error"] = public
+    original = http_exception_admin_message(exc)
+    if original:
+        excerpt = diagnostic_excerpt(original, 4000)
+        fields["raw_error"] = excerpt
+        fields["upstream_error"] = excerpt
+        fields["raw_detail"] = excerpt
+    return fields or None
+
+
+def _log_http_exception(call: "LoggedCall", exc: HTTPException) -> None:
+    call.log(
+        "调用失败",
+        status="failed",
+        error=http_exception_admin_message(exc),
+        extra=http_exception_log_fields(exc),
+    )
 
 
 def _exception_log_fields(exc: Exception, *, image: bool = False) -> dict[str, object]:
@@ -408,10 +463,14 @@ def _exception_log_fields(exc: Exception, *, image: bool = False) -> dict[str, o
         fields.update(failure.diagnostic_fields())
         fields["error_code"] = failure.code
         fields["public_error"] = _public_image_exception_message(exc, failure)
+        original = _admin_image_exception_message(exc)
         if failure.code == "image_poll_timeout":
             fields.pop("raw_error", None)
-        elif "raw_error" not in fields and not hasattr(exc, "raw_error"):
-            fields["raw_error"] = diagnostic_excerpt(str(exc), 4000)
+        elif original:
+            fields.setdefault("raw_error", diagnostic_excerpt(original, 4000))
+        if original:
+            fields.setdefault("upstream_error", diagnostic_excerpt(original, 4000))
+            fields.setdefault("raw_detail", diagnostic_excerpt(original, 4000))
     return fields
 
 
@@ -438,6 +497,17 @@ def _public_image_exception_message(
     return public_image_error_message(failure or _final_image_failure(exc), exc)
 
 
+def _admin_image_exception_message(exc: Exception) -> str:
+    raw = getattr(exc, "raw_error", None)
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    failure = getattr(exc, "failure", None)
+    raw_detail = getattr(failure, "raw_detail", None)
+    if isinstance(raw_detail, str) and raw_detail.strip():
+        return raw_detail.strip()
+    return str(exc or "").strip()
+
+
 def _image_error_payload(exc: Exception) -> dict[str, object]:
     failure = _final_image_failure(exc)
     error: dict[str, object] = {
@@ -458,7 +528,7 @@ def _image_error_response(exc: Exception) -> JSONResponse:
 
 
 def _protocol_error_response(exc: Exception, status_code: int, sse: str) -> JSONResponse:
-    message = "Upstream service unavailable. Please try again."
+    message = UPSTREAM_UNAVAILABLE_PUBLIC_MESSAGE
     if sse == "anthropic":
         return anthropic_error_response(message, status_code)
     return openai_error_response(
@@ -548,16 +618,16 @@ class LoggedCall:
             result = await run_in_threadpool(_call_handler)
         except ImageGenerationError as exc:
             suffix, status = _image_exception_log_status(exc)
-            self.log(suffix, status=status, error=_public_image_exception_message(exc), account_email=getattr(exc, "account_email", ""),
+            self.log(suffix, status=status, error=_admin_image_exception_message(exc), account_email=getattr(exc, "account_email", ""),
                      conversation_id=getattr(exc, "conversation_id", ""),
                      extra=_exception_log_fields(exc, image=image_request))
             return _image_error_response(exc)
         except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail))
+            _log_http_exception(self, exc)
             raise
         except Exception as exc:
             self.log("调用失败", status="failed", error=(
-                _public_image_exception_message(exc) if image_request else str(exc)
+                _admin_image_exception_message(exc) if image_request else str(exc)
             ), account_email=getattr(exc, "account_email", ""),
                      extra=_exception_log_fields(exc, image=image_request))
             if image_request:
@@ -624,16 +694,16 @@ class LoggedCall:
             has_first, first = await run_in_threadpool(_next_item_with_timing)
         except ImageGenerationError as exc:
             suffix, status = _image_exception_log_status(exc)
-            self.log(suffix, status=status, error=_public_image_exception_message(exc), account_email=getattr(exc, "account_email", ""),
+            self.log(suffix, status=status, error=_admin_image_exception_message(exc), account_email=getattr(exc, "account_email", ""),
                      conversation_id=getattr(exc, "conversation_id", ""),
                      extra=_exception_log_fields(exc, image=image_request))
             return _image_error_response(exc)
         except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail))
+            _log_http_exception(self, exc)
             raise
         except Exception as exc:
             self.log("调用失败", status="failed", error=(
-                _public_image_exception_message(exc) if image_request else str(exc)
+                _admin_image_exception_message(exc) if image_request else str(exc)
             ), account_email=getattr(exc, "account_email", ""),
                      extra=_exception_log_fields(exc, image=image_request))
             if image_request:
@@ -703,7 +773,7 @@ class LoggedCall:
                 suffix,
                 status=status,
                 error=(
-                    _public_image_exception_message(exc)
+                    _admin_image_exception_message(exc)
                     if image_request else str(exc)
                 ),
                 urls=urls,
@@ -714,7 +784,7 @@ class LoggedCall:
             if image_request and not hasattr(exc, "to_openai_error"):
                 from services.image_failure import ImageGenerationError, classify_image_exception
 
-                raw_error = str(exc) or "image generation failed"
+                raw_error = str(exc) or "图片生成失败。"
                 raise ImageGenerationError(
                     raw_error,
                     failure=classify_image_exception(exc),

@@ -82,10 +82,9 @@
           <FormField label="Push Key">
             <Input
               v-model="settings.genbox_push.push_key"
-              type="password"
               block
               :disabled="fieldReadOnly('genbox_push.push_key')"
-              :placeholder="settings.genbox_push.has_push_key ? '已配置，留空不修改' : '请输入 GenBox Push Key'"
+              placeholder="请输入 GenBox Push Key，留空保存则不修改"
             />
           </FormField>
         </FormSection>

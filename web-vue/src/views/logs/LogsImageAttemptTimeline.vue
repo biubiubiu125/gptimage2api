@@ -107,9 +107,13 @@
                   <Icon icon="lucide:chevron-down" />
                 </summary>
                 <div class="attempt-timeline__error-content">
-                  <div v-if="attempt.publicError" class="attempt-timeline__raw-error">
+                  <div v-if="attempt.publicError" class="attempt-timeline__raw-error" title="对外错误">
                     <span>对外错误</span>
                     <code>{{ attempt.publicError }}</code>
+                  </div>
+                  <div v-if="attempt.error" class="attempt-timeline__raw-error" title="原始错误">
+                    <span>原始错误</span>
+                    <code>{{ attempt.error }}</code>
                   </div>
                   <div
                     v-if="attempt.upstreamError"

@@ -72,7 +72,7 @@ def resolve_database_url(data_dir: Path = DEFAULT_DATA_DIR) -> str:
             return configured
         if _is_sqlite_url(configured):
             return configured
-        raise ValueError("application database must be PostgreSQL")
+        raise ValueError("应用数据库必须使用 PostgreSQL")
 
     local_url = build_postgres_url_from_env(APP_DATABASE_NAME)
     if local_url:

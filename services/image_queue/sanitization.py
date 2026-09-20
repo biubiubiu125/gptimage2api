@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from urllib.parse import urlsplit, urlunsplit
 
 from services.image_failure import ImageFailure, public_image_error_message, redact_public_urls
 
@@ -29,11 +28,11 @@ ALLOWED_IMAGE_TRACE_HEADERS = {
 }
 
 
-def _safe_text(value: object, limit: int = 4000) -> str:
+def _safe_text(value: object, limit: int = 0) -> str:
     text = str(value or "").strip()
-    text = _BEARER_RE.sub("Bearer [redacted]", text)
-    text = _SECRET_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[redacted]", text)
-    return text[:limit]
+    if limit > 0:
+        return text[:limit]
+    return text
 
 
 def _is_sensitive_key(key: object) -> bool:
@@ -41,19 +40,17 @@ def _is_sensitive_key(key: object) -> bool:
 
 
 def sanitize_event_data(value: object, *, _depth: int = 0) -> object:
-    if _depth > 8:
-        return "[truncated]"
     if isinstance(value, dict):
         sanitized: dict[str, object] = {}
         for key, item in value.items():
             key_text = str(key)
-            sanitized[key_text] = "[redacted]" if _is_sensitive_key(key_text) else sanitize_event_data(
+            sanitized[key_text] = sanitize_event_data(
                 item,
                 _depth=_depth + 1,
             )
         return sanitized
     if isinstance(value, (list, tuple, set, frozenset)):
-        return [sanitize_event_data(item, _depth=_depth + 1) for item in list(value)[:200]]
+        return [sanitize_event_data(item, _depth=_depth + 1) for item in value]
     if isinstance(value, (bytes, bytearray, memoryview)):
         return f"[bytes {len(bytes(value))}]"
     if isinstance(value, str):
@@ -71,47 +68,38 @@ def sanitize_trace_headers(headers: object) -> dict[str, str]:
         key_text = str(key or "").strip().lower()
         if key_text not in ALLOWED_IMAGE_TRACE_HEADERS:
             continue
-        text = _safe_text(value, 160)
+        text = _safe_text(value)
         if text:
             result[key_text] = text
     return result
 
 
 def sanitize_delivery_url(value: object) -> str:
-    """Keep delivery diagnostics useful without retaining URL credentials/query secrets."""
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    try:
-        parsed = urlsplit(text)
-    except ValueError:
-        parsed = None
-    if parsed is not None and parsed.scheme.lower() in {"http", "https"} and parsed.hostname:
-        host = parsed.hostname
-        if ":" in host and not host.startswith("["):
-            host = f"[{host}]"
-        try:
-            port = parsed.port
-        except ValueError:
-            port = None
-        netloc = f"{host}:{port}" if port is not None else host
-        return urlunsplit((
-            parsed.scheme.lower(),
-            netloc,
-            parsed.path,
-            "",
-            "",
-        ))[:1000]
-    if text.startswith("/"):
-        return text.split("?", 1)[0].split("#", 1)[0][:1000]
-    return redact_public_urls(text)[:1000]
+    """Keep the original delivery URL for admin diagnostics."""
+    return str(value or "").strip()
+
+
+def original_queue_error_message(error: BaseException, failure: ImageFailure) -> str:
+    candidates = (
+        failure.raw_detail,
+        getattr(error, "raw_error", None),
+        getattr(error, "raw_upstream_message", None),
+        getattr(error, "upstream_error", None),
+        str(error or ""),
+        failure.code,
+    )
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def safe_queue_error_message(error: BaseException, failure: ImageFailure) -> str:
     message = public_image_error_message(failure, error).strip()
     if not message:
-        message = "Image generation failed. Please try again."
+        message = "图片生成失败，请稍后重试。"
     message = redact_public_urls(message)
     message = _BEARER_RE.sub("Bearer [redacted]", message)
     message = _SECRET_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[redacted]", message)
-    return message[:1000]
+    return message

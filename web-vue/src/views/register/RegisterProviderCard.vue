@@ -75,7 +75,6 @@
           <span class="register-label">API Key</span>
           <Input
             :model-value="provider.api_key"
-            type="password"
             block
             root-class="font-mono"
             :disabled="disabled"
@@ -277,16 +276,16 @@
       </div>
 
       <label class="register-field">
-        <span class="register-label">邮箱池追加/覆盖（凭据只写入不回显）</span>
+        <span class="register-label">邮箱池（完整列表）</span>
         <textarea
           class="register-textarea register-textarea--tall"
           :disabled="disabled"
           :value="String(provider.mailboxes || '')"
-          placeholder="仅填写新行：邮箱----密码----client_id----refresh_token；已保存凭据不会回显"
+          placeholder="每行：邮箱----密码----client_id----refresh_token。留空保存则不修改整池"
           @input="emit('update-field', index, 'mailboxes', ($event.target as HTMLTextAreaElement).value)"
         ></textarea>
       </label>
-      <p class="register-preview-line">留空表示保持现有邮箱池不变；保存后的密码、client_id 和 refresh_token 不会再次显示。</p>
+      <p class="register-preview-line">提交的是完整邮箱池。删除一行后保存会从池中移除该邮箱；某行密码留空则沿用已保存密码。</p>
 
       <div class="register-outlook-toolbar">
         <div class="register-outlook-summary">

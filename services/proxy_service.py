@@ -22,6 +22,7 @@ from services.storage.configuration_repository import (
     ProxyConfigurationRepository,
     proxy_configuration_repository,
 )
+from utils.log import logger
 
 DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY_LIMIT = 30
 MAX_PROXY_NODE_IMAGE_CONCURRENCY_LIMIT = 10000
@@ -481,7 +482,7 @@ class ProxySettingsStore:
             and time.monotonic() >= deadline_monotonic
         ):
             raise ImageEgressDeadlineError(
-                "image request deadline exceeded before egress acquisition"
+                "获取出口前图片请求超过截止时间。"
             )
         if bool(getattr(profile, "image_egress_reserved", False)):
             return max(0, int(getattr(profile, "image_egress_wait_ms", 0) or 0))
@@ -499,7 +500,7 @@ class ProxySettingsStore:
                 )
                 if remaining is not None and remaining <= 0:
                     raise ImageEgressDeadlineError(
-                        "image request deadline exceeded while waiting for egress capacity"
+                        "等待出口容量时图片请求超过截止时间。"
                     )
                 self._egress_condition.wait(
                     timeout=min(1.0, remaining) if remaining is not None else 1.0
@@ -601,7 +602,7 @@ class ProxySettingsStore:
             )
             if not selection.proxy_url:
                 raise ProxyReferenceUnavailableError(
-                    f"proxy group is unavailable: {group_id or '(missing id)'}"
+                    f"代理分组不可用：{group_id or '（缺少 ID）'}"
                 )
             return ResolvedProxyReference(
                 proxy_url=selection.proxy_url,
@@ -665,7 +666,7 @@ class ProxySettingsStore:
                     )
                     if remaining is not None and remaining <= 0:
                         raise ImageEgressDeadlineError(
-                            "image request deadline exceeded while selecting proxy group capacity"
+                            "选择代理组容量时图片请求超过截止时间。"
                         )
                     available_nodes = [
                         (node_index, node)
@@ -911,7 +912,7 @@ def test_proxy(url: str = "", *, timeout: float = 15.0) -> dict:
             "ok": False,
             "status": 0,
             "latency_ms": 0,
-            "error": "no active proxy configured",
+            "error": "当前没有可用代理。",
             **result_base,
         }
     if not _is_valid_proxy_url(candidate):
@@ -919,7 +920,7 @@ def test_proxy(url: str = "", *, timeout: float = 15.0) -> dict:
             "ok": False,
             "status": 0,
             "latency_ms": 0,
-            "error": "invalid proxy url",
+            "error": "代理地址无效。",
             **result_base,
         }
     session = Session(**chrome146_session_kwargs({
@@ -943,11 +944,16 @@ def test_proxy(url: str = "", *, timeout: float = 15.0) -> dict:
         }
     except Exception as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
+        logger.error({
+            "event": "proxy_test_failed",
+            "error": _redact_url_credentials(str(exc) or exc.__class__.__name__),
+            "type": type(exc).__name__,
+        })
         return {
             "ok": False,
             "status": 0,
             "latency_ms": latency_ms,
-            "error": _redact_url_credentials(str(exc) or exc.__class__.__name__),
+            "error": "代理测试失败。",
             **result_base,
         }
     finally:
@@ -965,20 +971,25 @@ def test_clearance(target_url: str = "https://chatgpt.com") -> dict:
             "latency_ms": 0,
             "has_cookies": False,
             "user_agent": "",
-            "error": "clearance is disabled",
+            "error": "通行状态未启用。",
             "runtime": status,
         }
     try:
         bundle = proxy_settings.refresh_clearance(target_url=target_url, force=True, upstream=True)
     except Exception as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
+        logger.error({
+            "event": "clearance_test_failed",
+            "error": _redact_url_credentials(str(exc) or exc.__class__.__name__),
+            "type": type(exc).__name__,
+        })
         return {
             "ok": False,
             "status": "error",
             "latency_ms": latency_ms,
             "has_cookies": False,
             "user_agent": "",
-            "error": _redact_url_credentials(str(exc) or exc.__class__.__name__),
+            "error": "通行状态测试失败。",
             "runtime": proxy_settings.get_runtime_status(),
         }
 
@@ -991,7 +1002,7 @@ def test_clearance(target_url: str = "https://chatgpt.com") -> dict:
             "latency_ms": latency_ms,
             "has_cookies": False,
             "user_agent": "",
-            "error": "clearance refresh returned no bundle",
+            "error": "通行状态刷新未返回有效结果。",
             "runtime": runtime,
         }
     return {

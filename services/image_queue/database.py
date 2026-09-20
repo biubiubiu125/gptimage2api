@@ -680,7 +680,7 @@ def _validate_schema(connection) -> None:
     table_names = set(inspector.get_table_names())
     for table in Base.metadata.sorted_tables:
         if table.name not in table_names:
-            errors.append(f"{table.name} missing table")
+            errors.append(f"{table.name} 缺少表")
             continue
         actual_column_info = {
             str(column["name"]): column
@@ -690,18 +690,18 @@ def _validate_schema(connection) -> None:
         expected_columns = {str(column.name) for column in table.columns}
         missing_columns = sorted(expected_columns - actual_columns)
         if missing_columns:
-            errors.append(f"{table.name} missing columns {', '.join(missing_columns[:8])}")
+            errors.append(f"{table.name} 缺少列 {', '.join(missing_columns[:8])}")
         for column in table.columns:
             actual = actual_column_info.get(column.name)
             if actual is None:
                 continue
             if not _types_compatible(column.type, actual["type"]):
                 errors.append(
-                    f"{table.name}.{column.name} has incompatible type "
-                    f"{actual['type']!s}; expected {column.type!s}"
+                    f"{table.name}.{column.name} 类型不兼容 "
+                    f"{actual['type']!s}，期望 {column.type!s}"
                 )
             if not column.nullable and bool(actual.get("nullable", True)):
-                errors.append(f"{table.name}.{column.name} must be NOT NULL")
+                errors.append(f"{table.name}.{column.name} 不能为空")
 
         unique_sets = _unique_sets(inspector, table.name)
         expected_unique_sets = {
@@ -717,7 +717,7 @@ def _validate_schema(connection) -> None:
         missing_uniques = sorted(expected_unique_sets - unique_sets)
         if missing_uniques:
             formatted = ", ".join("(" + ", ".join(columns) + ")" for columns in missing_uniques[:4])
-            errors.append(f"{table.name} missing unique constraints {formatted}")
+            errors.append(f"{table.name} 缺少唯一约束 {formatted}")
         actual_indexes = _index_signatures(inspector, table.name)
         expected_indexes = {
             (_constraint_columns(index.columns), bool(index.unique))
@@ -730,17 +730,17 @@ def _validate_schema(connection) -> None:
                 "(" + ", ".join(columns) + ")"
                 for columns, _unique in missing_indexes[:4]
             )
-            errors.append(f"{table.name} missing indexes {formatted}")
+            errors.append(f"{table.name} 缺少索引 {formatted}")
         missing_foreign_keys = _missing_foreign_keys(inspector, table)
         if missing_foreign_keys:
             formatted = ", ".join(
                 f"({', '.join(constrained)}) -> {referred_table}({', '.join(referred)})"
                 for constrained, referred_table, referred in sorted(missing_foreign_keys)
             )
-            errors.append(f"{table.name} missing foreign keys {formatted}")
+            errors.append(f"{table.name} 缺少外键 {formatted}")
     if errors:
         raise ImageQueueConfigurationError(
-            "image queue schema is incomplete: " + "; ".join(errors[:8])
+            "图片队列表结构不完整：" + "; ".join(errors[:8])
         )
 
 
@@ -813,7 +813,7 @@ def _apply_schema_migrations(connection, current_version: int) -> None:
         current_version = max(versions)
     if current_version > SCHEMA_VERSION:
         raise ImageQueueConfigurationError(
-            f"image queue schema version {current_version} is newer than supported {SCHEMA_VERSION}"
+            f"图片队列结构版本 {current_version} 新于当前支持的 {SCHEMA_VERSION}。"
         )
     if current_version and versions != list(range(1, current_version + 1)):
         if versions == [SCHEMA_VERSION] and current_version == SCHEMA_VERSION:
@@ -827,13 +827,13 @@ def _apply_schema_migrations(connection, current_version: int) -> None:
                 )
             return
         raise ImageQueueConfigurationError(
-            "image queue schema migration history is incomplete"
+            "图片队列结构迁移历史不完整。"
         )
     for version in range(current_version + 1, SCHEMA_VERSION + 1):
         migration = SCHEMA_MIGRATIONS.get(version)
         if migration is None:
             raise ImageQueueConfigurationError(
-                f"image queue migration {version} is not implemented"
+                f"图片队列结构迁移 {version} 尚未实现。"
             )
         migration(connection)
         connection.execute(
@@ -859,7 +859,7 @@ class ImageQueueDatabase:
                 self._session_factory = None
                 return
             if not allow_non_postgres and not settings.database_url.lower().startswith("postgresql"):
-                raise ImageQueueConfigurationError("image queue requires PostgreSQL")
+                raise ImageQueueConfigurationError("图片队列必须使用 PostgreSQL。")
             engine_options: dict[str, object] = {"pool_pre_ping": True}
             if settings.database_url.lower().startswith("postgresql"):
                 engine_options.update({
@@ -868,7 +868,7 @@ class ImageQueueDatabase:
                 })
             engine = create_engine(settings.database_url, **engine_options)
         elif not allow_non_postgres and engine.dialect.name != "postgresql":
-            raise ImageQueueConfigurationError("image queue requires PostgreSQL")
+            raise ImageQueueConfigurationError("图片队列必须使用 PostgreSQL。")
         self.engine: Engine | None = engine
         self._session_factory = sessionmaker(bind=engine, expire_on_commit=False, class_=Session)
 
@@ -882,7 +882,7 @@ class ImageQueueDatabase:
 
     def start(self) -> None:
         if self.engine is None:
-            raise ImageQueueUnavailableError("image queue PostgreSQL is not configured")
+            raise ImageQueueUnavailableError("图片队列尚未配置 PostgreSQL。")
         with self._lock:
             if self._started:
                 return
@@ -912,7 +912,7 @@ class ImageQueueDatabase:
     @contextmanager
     def session(self) -> Iterator[Session]:
         if not self._started or self._session_factory is None:
-            raise ImageQueueUnavailableError("image queue database is not started")
+            raise ImageQueueUnavailableError("图片队列数据库尚未启动。")
         session = self._session_factory()
         try:
             yield session
@@ -932,7 +932,7 @@ class ImageQueueDatabase:
             )
             if transient_local:
                 raise
-            raise ImageQueueUnavailableError("image queue PostgreSQL is unavailable") from exc
+            raise ImageQueueUnavailableError("图片队列 PostgreSQL 暂时不可用。") from exc
         except Exception:
             session.rollback()
             raise

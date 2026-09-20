@@ -164,7 +164,7 @@ def check_request(text: str) -> None:
     api_key = str(review.get("api_key") or "").strip()
     model = str(review.get("model") or "").strip()
     if not base_url or not api_key or not model:
-        raise HTTPException(status_code=400, detail={"error": "ai review config is incomplete"})
+        raise HTTPException(status_code=400, detail={"error": "AI 审核配置不完整。"})
 
     fail_open = _resolve_fail_open(review)
 
@@ -220,7 +220,7 @@ def check_request(text: str) -> None:
         _on_failure({
             "event": "ai_review_response_not_json",
             "status_code": response.status_code,
-            "body_preview": str(response.text or "")[:200],
+            "body_preview": str(response.text or ""),
             "error": str(exc),
         })
         return
@@ -230,7 +230,7 @@ def check_request(text: str) -> None:
         _on_failure({
             "event": "ai_review_malformed_response",
             "status_code": response.status_code,
-            "body_preview": str(data)[:300],
+            "body_preview": str(data),
             "review_text_len": len(review_text),
             "original_text_len": len(text),
         })
@@ -243,7 +243,7 @@ def check_request(text: str) -> None:
     # Ambiguous decisions (e.g. "MAYBE", empty content) fall back to fail-open policy.
     _on_failure({
         "event": "ai_review_ambiguous_decision",
-        "decision": decision[:100],
+        "decision": decision,
         "review_text_len": len(review_text),
     })
     return

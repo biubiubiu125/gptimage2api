@@ -50,7 +50,7 @@ from services.gallery_view import (
 )
 from services.genbox_push_service import GenBoxPushError, push_gallery_image
 from services.image_task_service import image_task_service
-from services.image_failure import image_queue_http_message
+from services.image_failure import image_queue_http_message, public_http_chinese_error
 from services.image_queue.database import ImageQueueUnavailableError
 from services.image_queue.resource_controller import (
     ImageQueueResourcePressureError,
@@ -157,28 +157,30 @@ def _image_maintenance_http_exception(exc: Exception) -> HTTPException:
         "image_queue_resource_pressure",
         "image_queue_storage_full",
     }:
-        detail: dict[str, object] = {
-            "error": code,
-            "message": image_queue_http_message(code),
-        }
-        reason = str(getattr(exc, "reason", "") or "").strip()
-        if code == "image_queue_resource_pressure" and reason:
-            detail["reason"] = reason[:80]
-        return HTTPException(status_code=503, detail=detail)
+        return HTTPException(
+            status_code=503,
+            detail={
+                "error": code,
+                "message": image_queue_http_message(code),
+            },
+        )
     return HTTPException(
         status_code=503,
         detail={
             "error": "image_storage_unavailable",
-            "message": "image storage is temporarily unavailable",
+            "message": public_http_chinese_error(
+                stage="图片存储",
+                reason="图片存储暂时不可用。",
+            ),
         },
     )
 
 
 def _settings_write_error_message(exc: OSError) -> str:
+    logger.error({"event": "settings_write_failed", "error": str(exc), "type": type(exc).__name__})
     return (
-        "保存设置失败：后端无法写入 Application Database。"
+        "保存设置失败：后端无法写入应用数据库。"
         "请检查数据库连接、权限和磁盘空间。"
-        f"原始错误：{exc}"
     )
 
 
@@ -273,12 +275,12 @@ def create_router(app_version: str) -> APIRouter:
         except Exception as exc:
             logger.error({
                 "event": "health_application_database_failed",
-                "error": sanitize_diagnostic_text(exc, limit=500),
+                "error": sanitize_diagnostic_text(exc),
             })
             application_database = {
                 "status": "unhealthy",
                 "healthy": False,
-                "error": "application database health check failed",
+                "error": "应用数据库健康检查失败。",
             }
 
         try:
@@ -286,21 +288,21 @@ def create_router(app_version: str) -> APIRouter:
         except Exception as exc:
             logger.error({
                 "event": "health_image_queue_failed",
-                "error": sanitize_diagnostic_text(exc, limit=500),
+                "error": sanitize_diagnostic_text(exc),
             })
             image_queue = {
                 "status": "unhealthy",
                 "healthy": False,
-                "error": "image queue health check failed",
+                "error": "图片队列健康检查失败。",
             }
 
         public_application_database = _public_health_component(
             application_database,
-            fallback_error="application database health check failed",
+            fallback_error="应用数据库健康检查失败。",
         )
         public_image_queue = _public_health_component(
             image_queue,
-            fallback_error="image queue health check failed",
+            fallback_error="图片队列健康检查失败。",
         )
         healthy = (
             public_application_database.get("status") == "healthy"
@@ -507,7 +509,7 @@ def create_router(app_version: str) -> APIRouter:
         require_admin(authorization)
         detail = await run_in_threadpool(log_service.get_detail, log_id)
         if detail is None:
-            raise HTTPException(status_code=404, detail={"error": "log not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该日志。"})
         return detail
 
     @router.post("/api/logs/delete")
@@ -538,7 +540,7 @@ def create_router(app_version: str) -> APIRouter:
         require_admin(authorization)
         record = realtime_monitor_service.call_detail(call_id)
         if record is None:
-            raise HTTPException(status_code=404, detail={"error": "monitor call not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该监控调用记录。"})
         return build_monitor_record_view(record)
 
     @router.post("/api/proxy/test")
@@ -553,7 +555,7 @@ def create_router(app_version: str) -> APIRouter:
         else:
             candidate = proxy_settings.get_profile(upstream=True).proxy_url
         if not candidate:
-            raise HTTPException(status_code=400, detail={"error": "proxy url is required"})
+            raise HTTPException(status_code=400, detail={"error": "必须提供代理地址。"})
         return {"result": await run_in_threadpool(test_proxy, candidate)}
 
     @router.get("/api/proxy/view", response_model=ProxyView)
@@ -631,11 +633,11 @@ def create_router(app_version: str) -> APIRouter:
 
         group_id = _proxy_group_id(body.id)
         if not group_id:
-            raise HTTPException(status_code=400, detail={"error": "proxy group id or url is required"})
+            raise HTTPException(status_code=400, detail={"error": "必须提供代理分组 ID 或地址。"})
         group_list = await run_in_threadpool(proxy_management_service.list_groups)
         group = next((item for item in group_list.groups if item.id == group_id), None)
         if group is None:
-            raise HTTPException(status_code=404, detail={"error": "proxy group not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该代理分组。"})
         node_id = _clean_text(body.node_id)
         nodes = [
             node for node in group.nodes
@@ -644,7 +646,7 @@ def create_router(app_version: str) -> APIRouter:
             and (not node_id or node.id == node_id)
         ]
         if not nodes:
-            raise HTTPException(status_code=400, detail={"error": "proxy group node url is required"})
+            raise HTTPException(status_code=400, detail={"error": "必须提供代理分组节点地址。"})
         results = [
             (node.id, await run_in_threadpool(test_proxy, node.url))
             for node in nodes
@@ -740,7 +742,7 @@ def create_router(app_version: str) -> APIRouter:
         require_admin(authorization)
         rel = body.path.strip().lstrip("/")
         if not rel:
-            raise HTTPException(status_code=400, detail={"error": "path is required"})
+            raise HTTPException(status_code=400, detail={"error": "必须提供路径。"})
         tags = set_tags(rel, body.tags)
         return {"ok": True, "tags": tags}
 

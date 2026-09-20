@@ -135,7 +135,7 @@ export function useSettingsBackupRuntime(options: SettingsBackupRuntimeOptions) 
   async function restoreBackupItem(item: BackupItem) {
     const confirmed = await confirmDialog.ask({
       title: '恢复备份',
-      message: `恢复 ${item.name || item.key} 会覆盖 Application Database、队列和已包含的文件。恢复完成后必须重启服务。确定继续？`,
+      message: `恢复 ${item.name || item.key} 会覆盖应用数据库、队列和已包含的文件。恢复完成后必须重启服务。确定继续？`,
       confirmText: '确认恢复',
       cancelText: '取消',
     })

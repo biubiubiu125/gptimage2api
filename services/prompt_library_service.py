@@ -125,6 +125,13 @@ def _clean(value: object) -> str:
     return str(value or "").strip()
 
 
+def _prompt_source_error_text(error: object, fallback: str) -> str:
+    text = str(error or "").strip()
+    if any("\u4e00" <= char <= "\u9fff" for char in text):
+        return text[:500]
+    return _clean(fallback)[:500]
+
+
 def _source_sync_projection(
     *,
     enabled: bool,
@@ -261,7 +268,7 @@ def _valid_http_url(value: object, *, allow_empty: bool = True) -> str:
         return ""
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise PromptRegistryError(f"invalid URL: {url[:120]}")
+        raise PromptRegistryError(f"无效的地址：{url[:120]}")
     return url
 
 
@@ -279,7 +286,7 @@ def _absolute_url(base: str, value: object) -> str:
 def _safe_registry_path(value: object) -> str:
     path = _clean(value).replace("\\", "/").lstrip("/")
     if not path or ".." in path.split("/") or not re.fullmatch(r"[A-Za-z0-9._/-]+", path):
-        raise PromptRegistryError("invalid registry path")
+        raise PromptRegistryError("提示词库路径无效。")
     return path
 
 
@@ -335,19 +342,19 @@ def _default_registry_sources() -> list[dict[str, Any]]:
 
 def _normalize_registry_source(raw: object) -> dict[str, Any]:
     if not isinstance(raw, dict):
-        raise PromptRegistryError("registry source must be an object")
+        raise PromptRegistryError("提示词来源必须是对象。")
     source_id = _clean(raw.get("id"))
     if not re.fullmatch(r"[a-z0-9-]+", source_id):
-        raise PromptRegistryError(f"invalid registry source id: {source_id[:80]}")
+        raise PromptRegistryError(f"提示词来源 ID 无效：{source_id[:80]}")
     sha256 = _clean(raw.get("sha256")).lower()
     if not re.fullmatch(r"[a-f0-9]{64}", sha256):
-        raise PromptRegistryError(f"invalid registry source hash: {source_id}")
+        raise PromptRegistryError(f"提示词来源校验值无效：{source_id}")
     count = _int_or_none(raw.get("count"))
     if count is None or count < 0:
-        raise PromptRegistryError(f"invalid registry source count: {source_id}")
+        raise PromptRegistryError(f"提示词来源数量无效：{source_id}")
     name = _clean_inline(raw.get("name"))
     if not name:
-        raise PromptRegistryError(f"registry source is missing a name: {source_id}")
+        raise PromptRegistryError(f"提示词来源缺少名称：{source_id}")
     return {
         "id": source_id,
         "name": name[:120],
@@ -390,28 +397,28 @@ def _normalize_registry_manifest(payload: bytes) -> tuple[dict[str, Any], list[d
     try:
         raw = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise PromptRegistryError("registry manifest is not valid JSON") from exc
+        raise PromptRegistryError("提示词库清单不是有效 JSON。") from exc
     if not isinstance(raw, dict):
-        raise PromptRegistryError("registry manifest must be an object")
+        raise PromptRegistryError("提示词库清单必须是对象。")
     if raw.get("schemaVersion") != PROMPT_REGISTRY_SCHEMA_VERSION:
-        raise PromptRegistryError(f"unsupported registry schema: {raw.get('schemaVersion')!r}")
+        raise PromptRegistryError(f"不支持的提示词库版本：{raw.get('schemaVersion')!r}")
     registry_revision = _clean(raw.get("registryHash")).lower()
     if not re.fullmatch(r"[a-f0-9]{64}", registry_revision):
-        raise PromptRegistryError("registry manifest has an invalid registryHash")
+        raise PromptRegistryError("提示词库清单的 registryHash 无效。")
     generated_at = _clean(raw.get("generatedAt"))
     if not generated_at:
-        raise PromptRegistryError("registry manifest is missing generatedAt")
+        raise PromptRegistryError("提示词库清单缺少 generatedAt。")
     prompts_path = _safe_registry_path(raw.get("promptsPath"))
     raw_sources = raw.get("sources")
     if not isinstance(raw_sources, list) or not raw_sources:
-        raise PromptRegistryError("registry manifest has no sources")
+        raise PromptRegistryError("提示词库清单没有来源。")
     sources = [_normalize_registry_source(source) for source in raw_sources]
     source_ids = [source["id"] for source in sources]
     if len(source_ids) != len(set(source_ids)):
-        raise PromptRegistryError("registry manifest has duplicate source ids")
+        raise PromptRegistryError("提示词库清单存在重复的来源 ID。")
     total = _int_or_none(raw.get("total"))
     if total is None or total < 0 or total != sum(source["count"] for source in sources):
-        raise PromptRegistryError("registry manifest total does not match source counts")
+        raise PromptRegistryError("提示词库清单总数与来源数量不一致。")
     return {
         "revision": registry_revision,
         "generated_at": generated_at,
@@ -422,22 +429,22 @@ def _normalize_registry_manifest(payload: bytes) -> tuple[dict[str, Any], list[d
 
 def _normalize_registry_item(raw: object, source: dict[str, Any]) -> PromptLibraryItem:
     if not isinstance(raw, dict):
-        raise PromptRegistryError("registry prompt must be an object")
+        raise PromptRegistryError("提示词必须是对象。")
     unknown_fields = set(raw) - _REGISTRY_ITEM_FIELDS
     missing_fields = _REGISTRY_ITEM_REQUIRED_FIELDS - set(raw)
     if unknown_fields:
-        raise PromptRegistryError(f"registry prompt contains unsupported fields: {sorted(unknown_fields)!r}")
+        raise PromptRegistryError(f"提示词包含不支持的字段：{sorted(unknown_fields)!r}")
     if missing_fields:
-        raise PromptRegistryError(f"registry prompt is missing fields: {sorted(missing_fields)!r}")
+        raise PromptRegistryError(f"提示词缺少字段：{sorted(missing_fields)!r}")
 
     source_id = _clean(raw.get("sourceId"))
     item_id = _clean(raw.get("id"))
     if source_id != source["id"] or not item_id.startswith(f"{source_id}:"):
-        raise PromptRegistryError(f"registry prompt has an invalid id/sourceId pair: {item_id[:120]}")
+        raise PromptRegistryError(f"提示词 id/sourceId 无效：{item_id[:120]}")
     title = _clean_inline(raw.get("title"))
     prompt = _clean(raw.get("prompt"))
     if not title or not prompt:
-        raise PromptRegistryError(f"registry prompt is missing title or prompt: {item_id[:120]}")
+        raise PromptRegistryError(f"提示词缺少标题或正文：{item_id[:120]}")
 
     tags = _string_tuple(raw.get("tags"), max_items=24)
     references = _string_tuple(raw.get("referenceImageUrls"), max_items=12)
@@ -447,7 +454,7 @@ def _normalize_registry_item(raw: object, source: dict[str, Any]) -> PromptLibra
     link = _valid_http_url(raw.get("sourceUrl"), allow_empty=False)
     image_count = _int_or_none(raw.get("imageCount"))
     if "imageCount" in raw and (image_count is None or image_count < 1):
-        raise PromptRegistryError(f"registry prompt has an invalid imageCount: {item_id[:120]}")
+        raise PromptRegistryError(f"提示词 imageCount 无效：{item_id[:120]}")
     return PromptLibraryItem(
         id=item_id,
         source_id=source_id,
@@ -486,33 +493,33 @@ def _validate_registry_payload(
         + payload
     ).hexdigest()
     if expected_revision != manifest["revision"]:
-        raise PromptRegistryError("registry manifest and prompt payload hashes do not match")
+        raise PromptRegistryError("提示词库清单与正文校验值不一致。")
     try:
         raw_items = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise PromptRegistryError("registry prompt payload is not valid JSON") from exc
+        raise PromptRegistryError("提示词正文不是有效 JSON。") from exc
     if not isinstance(raw_items, list) or len(raw_items) != manifest["total"]:
-        raise PromptRegistryError("registry prompt count does not match the manifest")
+        raise PromptRegistryError("提示词数量与清单不一致。")
 
     sources_by_id = {source["id"]: source for source in sources}
     grouped: dict[str, list[PromptLibraryItem]] = {source_id: [] for source_id in sources_by_id}
     seen_ids: set[str] = set()
     for raw_item in raw_items:
         if not isinstance(raw_item, dict):
-            raise PromptRegistryError("registry prompt must be an object")
+            raise PromptRegistryError("提示词必须是对象。")
         source_id = _clean(raw_item.get("sourceId"))
         source = sources_by_id.get(source_id)
         if source is None:
-            raise PromptRegistryError(f"registry prompt references an unknown source: {source_id[:80]}")
+            raise PromptRegistryError(f"提示词引用了未知来源：{source_id[:80]}")
         item = _normalize_registry_item(raw_item, source)
         if item.id in seen_ids:
-            raise PromptRegistryError(f"registry prompt id is duplicated: {item.id[:120]}")
+            raise PromptRegistryError(f"提示词 ID 重复：{item.id[:120]}")
         seen_ids.add(item.id)
         grouped[source_id].append(item)
 
     for source in sources:
         if len(grouped[source["id"]]) != source["count"]:
-            raise PromptRegistryError(f"registry source count does not match: {source['id']}")
+            raise PromptRegistryError(f"提示词来源数量不一致：{source['id']}")
     return {source_id: tuple(items) for source_id, items in grouped.items()}
 
 
@@ -616,7 +623,7 @@ class PromptLibraryService:
         if base.endswith("/manifest.json"):
             base = base[: -len("/manifest.json")]
         if not base:
-            raise ValueError("prompt registry URL is required")
+            raise ValueError("必须填写提示词库地址。")
         return base
 
     @classmethod
@@ -646,10 +653,10 @@ class PromptLibraryService:
         response.raise_for_status()
         content_length = _int_or_none(response.headers.get("content-length"))
         if content_length is not None and content_length > max_bytes:
-            raise PromptRegistryError(f"registry response exceeds {max_bytes} bytes")
+            raise PromptRegistryError(f"提示词库响应超过 {max_bytes} 字节。")
         payload = response.content
         if len(payload) > max_bytes:
-            raise PromptRegistryError(f"registry response exceeds {max_bytes} bytes")
+            raise PromptRegistryError(f"提示词库响应超过 {max_bytes} 字节。")
         return payload
 
     @staticmethod
@@ -764,7 +771,7 @@ class PromptLibraryService:
             raw = json.loads(self.bundled_path.read_text(encoding="utf-8"))
             raw_items = raw.get("prompts", []) if isinstance(raw, dict) else raw
             if not isinstance(raw_items, list):
-                raise ValueError("bundled prompt library must contain an array")
+                raise ValueError("内置提示词库必须是数组。")
             items = tuple(
                 item
                 for value in raw_items
@@ -774,7 +781,7 @@ class PromptLibraryService:
             self._source_status[source["id"]] = {
                 "content_revision": "",
                 "last_sync_at": "",
-                "last_error": f"bundled snapshot failed: {exc}"[:500],
+                "last_error": _prompt_source_error_text(exc, "内置提示词库加载失败。"),
                 "last_fetch_ms": 0,
             }
             return True
@@ -1128,7 +1135,7 @@ class PromptLibraryService:
                     return self._view
             except Exception as exc:
                 elapsed_ms = int((time.monotonic() - started) * 1000)
-                error = str(exc)[:500]
+                error = _prompt_source_error_text(exc, "刷新提示词来源失败。")
                 with self._state_lock:
                     targets = {normalized_id} if normalized_id else {
                         source["id"]

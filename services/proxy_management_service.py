@@ -125,7 +125,7 @@ def project_proxy_assignment(
             "",
             f"历史代理：{profile_id or '-'}",
         )
-    return ProxyAssignmentProjection(raw, "custom", "", _custom_proxy_display(raw))
+    return ProxyAssignmentProjection(raw, "custom", "", raw)
 
 
 def _stored_node_id(item: dict[str, Any], index: int) -> str:
@@ -155,30 +155,30 @@ def _unknown_health() -> ProxyHealth:
 def _normalized_proxy_node_url(value: object) -> tuple[str, str]:
     raw = _clean_text(value)
     if not raw:
-        return "", "proxy node url is required"
+        return "", "必须填写代理地址。"
     if any(char.isspace() for char in raw):
-        return "", "proxy node url cannot contain whitespace"
+        return "", "代理地址不能包含空白字符。"
     if "://" not in raw:
-        return "", "proxy node url must start with http://, https://, socks5://, or socks5h://"
+        return "", "请填写以 http://、https://、socks5:// 或 socks5h:// 开头的地址。"
 
     try:
         parsed = urlparse(raw)
         host = parsed.hostname
         port = parsed.port
     except ValueError:
-        return "", "proxy node url has an invalid host or port"
+        return "", "代理主机或端口格式无效。"
 
     scheme = parsed.scheme.lower()
     if scheme not in _PROXY_URL_SCHEMES:
-        return "", "proxy node url uses an unsupported scheme"
+        return "", "仅支持 HTTP、HTTPS 和 SOCKS5 代理。"
     if not host:
-        return "", "proxy node url requires a host"
+        return "", "缺少代理主机。"
     if parsed.netloc.endswith(":") or port == 0:
-        return "", "proxy node url has an invalid port"
+        return "", "代理端口格式无效。"
     if parsed.path not in {"", "/"}:
-        return "", "proxy node url cannot include a path"
+        return "", "代理地址不能包含路径。"
     if parsed.params or parsed.query or parsed.fragment:
-        return "", "proxy node url cannot include parameters, a query, or a fragment"
+        return "", "代理地址不能包含参数、查询或片段。"
 
     normalized = normalize_proxy_url(raw)
     normalized_parsed = urlparse(normalized)
@@ -190,7 +190,7 @@ def _normalized_proxy_node_url(value: object) -> tuple[str, str]:
         try:
             normalized_host = normalized_host.encode("idna").decode("ascii")
         except UnicodeError:
-            return "", "proxy node url has an invalid internationalized host"
+            return "", "国际化域名格式无效。"
     userinfo = ""
     if "@" in normalized_parsed.netloc:
         userinfo = f"{normalized_parsed.netloc.rsplit('@', 1)[0]}@"
@@ -333,17 +333,17 @@ class ProxyManagementService:
         if raw.lower().startswith("group:"):
             group_id = _group_reference_id(raw)
             if not group_id:
-                raise ValueError("proxy group id is required")
+                raise ValueError("必须提供代理分组 ID。")
             group = next(
                 (group for group in self._groups(snapshot) if group.id == group_id),
                 None,
             )
             if group is None:
-                raise ValueError("proxy group not found")
+                raise ValueError("找不到该代理分组。")
             if not group.enabled or not any(
                 node.enabled and node.url for node in group.nodes
             ):
-                raise ValueError("proxy group is unavailable")
+                raise ValueError("该代理分组当前不可用。")
             return f"group:{group_id}"
         return normalize_proxy_node_url(raw)
 
@@ -388,18 +388,18 @@ class ProxyManagementService:
                 None,
             )
             if bool(values.get("create_only")) and existing is not None:
-                raise ValueError("proxy group already exists")
+                raise ValueError("代理分组已存在。")
             group_id = (
                 _clean_text(existing.get("id"))
                 if existing is not None
                 else _slug_id(requested_id or values.get("name"))
             )
             if not group_id:
-                raise ValueError("proxy group id is required")
+                raise ValueError("必须提供代理分组 ID。")
             if existing is None and any(
                 _clean_text(item.get("id")) == group_id for item in raw_groups
             ):
-                raise ValueError("proxy group already exists")
+                raise ValueError("代理分组已存在。")
 
             base = dict(existing or {})
             strategy = _clean_text(
@@ -409,7 +409,7 @@ class ProxyManagementService:
             )
             strategy = strategy or "request_random"
             if strategy not in _PROXY_GROUP_STRATEGIES:
-                raise ValueError("unsupported proxy group strategy")
+                raise ValueError("不支持该代理分组策略。")
 
             if "nodes" in values and values.get("nodes") is not None:
                 node_values = values.get("nodes") or []
@@ -424,7 +424,7 @@ class ProxyManagementService:
                     if isinstance(node, dict)
                 ]
             if not nodes:
-                raise ValueError("proxy group requires at least one proxy node")
+                raise ValueError("代理分组至少需要一个节点。")
 
             item = {
                 **base,
@@ -470,7 +470,7 @@ class ProxyManagementService:
     def delete_group(self, group_id: object) -> ProxyGroupDeleteMutation:
         stored_id = _group_reference_id(group_id)
         if not stored_id:
-            raise ValueError("proxy group id is required")
+            raise ValueError("必须提供代理分组 ID。")
         with self._mutation_lock:
             snapshot = self._snapshot()
             raw_groups = self._raw_dict_list(snapshot, "proxy_groups")
@@ -479,11 +479,11 @@ class ProxyManagementService:
                 if _clean_text(group.get("id")) != stored_id
             ]
             if len(next_groups) == len(raw_groups):
-                raise KeyError("proxy group not found")
+                raise KeyError("找不到该代理分组。")
             references = self._group_reference_map(snapshot).get(stored_id, [])
             if references:
                 raise ProxyGroupInUseError(
-                    "proxy group is in use: " + ", ".join(references)
+                    "代理分组正在使用中：" + "、".join(references)
                 )
             updated = self._config.update({"proxy_groups": next_groups})
             return ProxyGroupDeleteMutation(
@@ -786,16 +786,16 @@ class ProxyManagementService:
             )
             node_id = node_id or f"node-{index + 1}"
             if node_id in seen_ids:
-                raise ValueError(f"duplicate proxy node id: {node_id}")
+                raise ValueError(f"代理节点 ID 重复：{node_id}")
             raw_url = _clean_text(raw.get("url"))
             if not raw_url:
-                raise ValueError(f"proxy node url is required: {node_id}")
+                raise ValueError(f"节点 {node_id} 缺少代理地址。")
             try:
                 url = normalize_proxy_node_url(raw_url)
             except ValueError as exc:
-                raise ValueError(f"{exc}: {node_id}") from exc
+                raise ValueError(f"节点 {node_id}：{exc}") from exc
             if url in seen_urls:
-                raise ValueError(f"duplicate proxy node url: {node_id}")
+                raise ValueError(f"代理节点地址重复：{node_id}")
             seen_ids.add(node_id)
             seen_urls.add(url)
             nodes.append({
@@ -838,17 +838,17 @@ class ProxyManagementService:
         if reference.mode == "group":
             group_id = _group_reference_id(reference.group_id)
             if not group_id:
-                raise ValueError("proxy group id is required")
+                raise ValueError("必须提供代理分组 ID。")
             group_ids = {
                 _clean_text(group.get("id"))
                 for group in self._raw_dict_list(snapshot, "proxy_groups")
             }
             if group_id not in group_ids:
-                raise ValueError("proxy group not found")
+                raise ValueError("找不到该代理分组。")
             return f"group:{group_id}"
         url = _clean_text(reference.url)
         if not url:
-            raise ValueError("proxy url is required")
+            raise ValueError("必须填写代理地址。")
         if url.lower().startswith("profile:"):
             profile_id = _clean_text(url.split(":", 1)[1])
             profile_ids = {
@@ -861,7 +861,7 @@ class ProxyManagementService:
             }
             if profile_id and (profile_id in profile_ids or url in configured_references):
                 return f"profile:{profile_id}"
-            raise ValueError("legacy proxy profile not found")
+            raise ValueError("找不到该旧版代理配置。")
         return normalize_proxy_node_url(url)
 
     def _effective_reference(

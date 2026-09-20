@@ -56,15 +56,15 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     response_format = durable_image.normalize_response_format(body.get("response_format"), "b64_json")
     if not durable_image.has_durable_context(body):
         raise ImageGenerationError(
-            "durable image task context is required",
+            "图片生成必须走持久化图片队列。",
             failure=image_failure(
                 "durable_context_required",
-                raw_detail="image edit requests must enter the PostgreSQL durable queue",
+                raw_detail="图片编辑必须进入 PostgreSQL 持久化图片队列。",
             ),
         )
     if not images and not durable_image.submission_task_id(body):
         raise ImageGenerationError(
-            "image is required",
+            "必须提供图片。",
             failure=image_failure("invalid_image_input"),
         )
     if body.get("stream"):

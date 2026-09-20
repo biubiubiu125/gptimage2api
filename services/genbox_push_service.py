@@ -239,7 +239,7 @@ def push_gallery_image(relative_path: str, *, metadata: Mapping[str, Any] | None
         with Image.open(io.BytesIO(payload)) as image:
             image.verify()
     except Exception as exc:
-        raise GenBoxPushError(404, "genbox_source_not_found", "Gallery image not registered or not a valid image") from exc
+        raise GenBoxPushError(404, "genbox_source_not_found", "图库中找不到该图片，或文件不是有效图片。") from exc
     sha256 = hashlib.sha256(payload).hexdigest()
     headers = {
         "X-GenBox-Source": str(settings["source_id"]),

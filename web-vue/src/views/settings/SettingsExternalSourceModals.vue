@@ -23,7 +23,7 @@
         </FormField>
       </div>
       <FormField label="管理密钥">
-        <Input v-model="cpaForm.secret_key" type="password" block :placeholder="editingCpaPoolId ? '留空则不修改密钥' : 'CPA 管理密钥'" />
+        <Input v-model="cpaForm.secret_key" block placeholder="CPA 管理密钥，留空保存则不修改" />
       </FormField>
     </ModalBody>
     <ModalFooter :bordered="false">
@@ -60,10 +60,10 @@
           <Input v-model.trim="sub2apiForm.email" block placeholder="admin@example.com" />
         </FormField>
         <FormField label="密码">
-          <Input v-model="sub2apiForm.password" type="password" block :placeholder="editingSub2apiId ? '留空则不修改密码' : '管理员密码'" />
+          <Input v-model="sub2apiForm.password" block placeholder="管理员密码，留空保存则不修改" />
         </FormField>
         <FormField label="Admin API Key">
-          <Input v-model="sub2apiForm.api_key" type="password" block :placeholder="editingSub2apiId ? '留空则不修改密钥' : '可替代邮箱密码'" />
+          <Input v-model="sub2apiForm.api_key" block placeholder="Admin API Key，留空保存则不修改" />
         </FormField>
         <FormField label="默认分组 ID">
           <Input v-model.trim="sub2apiForm.group_id" block placeholder="可选" />

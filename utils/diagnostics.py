@@ -94,68 +94,10 @@ def sanitize_diagnostic_text(
     proxy_values: Iterable[object] = (),
     limit: int = 0,
 ) -> str:
-    """Remove credentials from diagnostics before storage or projection."""
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    proxies = sorted(
-        {
-            proxy
-            for item in proxy_values
-            if (proxy := str(item or "").strip())
-            and proxy.casefold() not in _NON_SECRET_PROXY_VALUES
-        },
-        key=len,
-        reverse=True,
-    )
-    secrets = sorted(
-        {str(item or "").strip() for item in sensitive_values if str(item or "").strip()},
-        key=len,
-        reverse=True,
-    )
-    for proxy in proxies:
-        text = text.replace(proxy, "[proxy]")
-    for secret in secrets:
-        text = text.replace(secret, "[credential]")
-    text = re.sub(
-        r"(?i)([a-z][a-z0-9+.-]*://)[^\s/@:]+(?::[^\s/@]*)?@",
-        r"\1***@",
-        text,
-    )
-    text = re.sub(
-        r"(?i)(?<![a-z0-9])((?:\[[0-9a-f:.]+\]|localhost|"
-        r"\d{1,3}(?:\.\d{1,3}){3}|"
-        r"(?=[a-z0-9.-]*[a-z])[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?):\d{1,5}):"
-        r"[^:\s,;]+:[^\s,;]+",
-        r"\1:***:***",
-        text,
-    )
-    text = re.sub(
-        r"(?i)\b((?:Proxy-)?Authorization\s*:\s*(?:Basic|Bearer))\s+"
-        r"[A-Za-z0-9._~+/=-]+",
-        r"\1 [credential]",
-        text,
-    )
-    text = re.sub(
-        r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+",
-        "Bearer [credential]",
-        text,
-    )
-    text = re.sub(
-        r"(?i)([?&](?:(?:proxy[_-]?)?(?:user(?:name)?|pass(?:word)?)|"
-        r"access_token|refresh_token|id_token)=)[^&#\s]+",
-        r"\1***",
-        text,
-    )
-    text = re.sub(
-        r"(?i)((?<![a-z0-9_])[\"']?(?:access[_-]?token|refresh[_-]?token|"
-        r"id[_-]?token|password)"
-        r"[\"']?\s*[:=]\s*[\"']?)[^\s,;\"'&}]+",
-        r"\1[credential]",
-        text,
-    )
-    text = _sanitize_diagnostic_urls(text)
-    return text if limit <= 0 or len(text) <= limit else f"{text[:limit]}..."
+    """Return diagnostic text unchanged. Admin logs keep credentials in plaintext."""
+    del sensitive_values, proxy_values
+    del limit
+    return str(value or "").strip()
 
 
 def _collect_diagnostic_values(
@@ -181,43 +123,7 @@ def _scrub_diagnostic_value(
     sensitive_values: list[object],
     proxy_values: list[object],
 ) -> object:
-    if isinstance(value, dict):
-        result: dict[object, object] = {}
-        for key, item in value.items():
-            normalized_key = str(key).strip().lower().replace("-", "_")
-            if normalized_key in _DIAGNOSTIC_SECRET_KEYS and item not in (None, ""):
-                result[key] = "[credential]"
-            else:
-                result[key] = _scrub_diagnostic_value(
-                    item,
-                    sensitive_values,
-                    proxy_values,
-                )
-        return result
-    if isinstance(value, list):
-        return [
-            _scrub_diagnostic_value(
-                item,
-                sensitive_values,
-                proxy_values,
-            )
-            for item in value
-        ]
-    if isinstance(value, tuple):
-        return tuple(
-            _scrub_diagnostic_value(
-                item,
-                sensitive_values,
-                proxy_values,
-            )
-            for item in value
-        )
-    if isinstance(value, str):
-        return sanitize_diagnostic_text(
-            value,
-            sensitive_values=sensitive_values,
-            proxy_values=proxy_values,
-        )
+    del sensitive_values, proxy_values
     return value
 
 
@@ -227,27 +133,15 @@ def scrub_diagnostic_value(
     sensitive_values: Iterable[object] = (),
     proxy_values: Iterable[object] = (),
 ) -> object:
-    """Recursively sanitize strings and credential-bearing mapping fields."""
-    collected_sensitive_values = list(sensitive_values)
-    collected_proxy_values = list(proxy_values)
-    _collect_diagnostic_values(
-        value,
-        collected_sensitive_values,
-        collected_proxy_values,
-    )
-    return _scrub_diagnostic_value(
-        value,
-        collected_sensitive_values,
-        collected_proxy_values,
-    )
+    """Return diagnostic payloads unchanged. Admin logs keep credentials in plaintext."""
+    del sensitive_values, proxy_values
+    return value
 
 
-def diagnostic_excerpt(value: object, limit: int = 1000) -> str:
-    """Return a bounded diagnostic string for logs and upstream error details."""
-    text = str(value or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[: limit - 15].rstrip() + "...[truncated]"
+def diagnostic_excerpt(value: object, limit: int = 0) -> str:
+    """Return the full diagnostic string. Admin logs do not truncate plaintext."""
+    del limit
+    return str(value or "").strip()
 
 
 def exception_diagnostic_fields(

@@ -1377,7 +1377,7 @@ class AccountService:
                 account.get("id_token"),
             ),
             proxy_values=(account.get("proxy"),),
-            limit=2000,
+            limit=0,
         )
 
     @classmethod
@@ -2064,7 +2064,7 @@ class AccountService:
                 if remaining is not None and remaining <= 0:
                     raise ImageAccountSelectionError(
                         "deadline_exceeded",
-                        "image request deadline exceeded while waiting for an account slot",
+                        "等待账号名额时图片请求超过截止时间。",
                     )
                 # Token refresh can rotate an attempted account's access token while
                 # this request waits for a slot. Resolve aliases on every pass so the
@@ -2182,7 +2182,7 @@ class AccountService:
         if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
             raise ImageAccountSelectionError(
                 "deadline_exceeded",
-                "image request deadline exceeded before account selection",
+                "选择账号前图片请求超过截止时间。",
             )
         max_attempts = 20  # 防止无限循环
         externally_excluded = set(excluded_tokens or set())
@@ -2212,7 +2212,7 @@ class AccountService:
                 self.release_image_slot(access_token)
                 raise ImageAccountSelectionError(
                     "deadline_exceeded",
-                    "image request deadline exceeded before remote account validation",
+                    "远程验号前图片请求超过截止时间。",
                 )
             try:
                 account = self.fetch_remote_info(
@@ -2230,14 +2230,14 @@ class AccountService:
                 if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                     raise ImageAccountSelectionError(
                         "deadline_exceeded",
-                        "image request deadline exceeded during remote account validation",
+                        "远程验号时图片请求超过截止时间。",
                     )
                 continue
             if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                 self.release_image_slot(access_token)
                 raise ImageAccountSelectionError(
                     "deadline_exceeded",
-                    "image request deadline exceeded during remote account validation",
+                    "远程验号时图片请求超过截止时间。",
                 )
             # fetch_remote_info 内部可能因 token rotation 导致 access_token 变化，
             # 把新 token 也加入排除列表，防止重复尝试
@@ -3471,7 +3471,7 @@ class AccountService:
                 and resolved_replacement in self._accounts
                 and resolved_replacement != access_token
             ):
-                raise ValueError("access token already belongs to another account")
+                raise ValueError("该 access token 已属于其他账号。")
 
             refresh_token_changed = (
                 "refresh_token" in normalized_updates
@@ -4440,7 +4440,7 @@ class AccountService:
         proxy: str = "",
     ) -> dict[str, Any] | None:
         if not access_token:
-            raise ValueError("access_token is required")
+            raise ValueError("缺少 access token。")
 
         if allow_refresh_token_exchange and preflight_refresh:
             refresh_kwargs = {"event": f"{event}:preflight"}

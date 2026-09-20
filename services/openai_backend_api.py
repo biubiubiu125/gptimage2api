@@ -246,6 +246,97 @@ class EditableFileExportResult:
     zip_path: Path
 
 
+def _merge_backend_account(
+    stored: dict[str, Any] | None,
+    injected: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = dict(stored or {}) if isinstance(stored, dict) else {}
+    extra = dict(injected or {}) if isinstance(injected, dict) else {}
+    stored_fp = merged.get("fp") if isinstance(merged.get("fp"), dict) else {}
+    extra_fp = extra.get("fp") if isinstance(extra.get("fp"), dict) else {}
+    if stored_fp or extra_fp:
+        extra = dict(extra)
+        extra["fp"] = {**stored_fp, **extra_fp}
+    merged.update(extra)
+    return merged
+
+
+def resolve_backend_explicit_proxy(
+    account: dict[str, Any] | None = None,
+    proxy: str = "",
+    proxy_url: str | None = None,
+) -> str:
+    explicit = str(proxy or proxy_url or "").strip()
+    if explicit:
+        return explicit
+    if isinstance(account, dict):
+        return str(account.get("proxy") or "").strip()
+    return ""
+
+
+def build_picture_v2_start_payload(
+    *,
+    prompt: str,
+    model: str,
+    references: list[Dict[str, Any]] | None = None,
+    message_id: str | None = None,
+    parent_message_id: str | None = None,
+) -> dict[str, Any]:
+    references = references or []
+    parts = [{
+        "content_type": "image_asset_pointer",
+        "asset_pointer": f"file-service://{item['file_id']}",
+        "width": item["width"],
+        "height": item["height"],
+        "size_bytes": item["file_size"],
+    } for item in references]
+    parts.append(prompt)
+    content = (
+        {"content_type": "multimodal_text", "parts": parts}
+        if references
+        else {"content_type": "text", "parts": [prompt]}
+    )
+    metadata: dict[str, Any] = {
+        "developer_mode_connector_ids": [],
+        "selected_github_repos": [],
+        "selected_all_github_repos": False,
+        "system_hints": ["picture_v2"],
+        "serialization_metadata": {"custom_symbol_offsets": []},
+    }
+    if references:
+        metadata["attachments"] = [{
+            "id": item["file_id"],
+            "mimeType": item["mime_type"],
+            "name": item["file_name"],
+            "size": item["file_size"],
+            "width": item["width"],
+            "height": item["height"],
+        } for item in references]
+    return {
+        "action": "next",
+        "messages": [{
+            "id": message_id or new_uuid(),
+            "author": {"role": "user"},
+            "create_time": time.time(),
+            "content": content,
+            "metadata": metadata,
+        }],
+        "parent_message_id": parent_message_id or new_uuid(),
+        "model": model,
+        "client_prepare_state": "sent",
+        "timezone_offset_min": CHROME146_TIMEZONE_OFFSET_MIN,
+        "timezone": CHROME146_TIMEZONE,
+        "conversation_mode": {"kind": "primary_assistant"},
+        "enable_message_followups": True,
+        "system_hints": ["picture_v2"],
+        "supports_buffering": True,
+        "supported_encodings": ["v1"],
+        "client_contextual_info": chrome146_client_contextual_info(),
+        "paragen_cot_summary_display_override": "allow",
+        "force_parallel_switch": "auto",
+    }
+
+
 class OpenAIBackendAPI:
     """ChatGPT Web 后端封装。
 
@@ -266,18 +357,23 @@ class OpenAIBackendAPI:
             proxy: str = "",
             proxy_url: str | None = None,
             deadline_monotonic: float | None = None,
+            account: dict[str, Any] | None = None,
     ) -> None:
         """初始化后端客户端。
 
         参数：
         - `access_token`：可选。传入后表示使用已登录链路；不传则使用未登录链路。
+        - `account`：可选。验活/收口时注入尚未入库的账号指纹、代理和 cookie。
         """
         self.base_url = "https://chatgpt.com"
         self.client_version = DEFAULT_CLIENT_VERSION
         self.client_build_number = DEFAULT_CLIENT_BUILD_NUMBER
         self.access_token = access_token
-        self.account = account_service.get_account(self.access_token) if self.access_token else {}
-        self.account = self.account if isinstance(self.account, dict) else {}
+        stored = account_service.get_account(self.access_token) if self.access_token else {}
+        self.account = _merge_backend_account(
+            stored if isinstance(stored, dict) else {},
+            account,
+        )
         self._credential_access_token = str(self.access_token or "").strip()
         self._credential_refresh_token = str(self.account.get("refresh_token") or "").strip()
         self._credential_last_token_refresh_at = self.account.get("last_token_refresh_at")
@@ -292,7 +388,7 @@ class OpenAIBackendAPI:
         self._image_result_timing: dict[str, int] = {}
         self._closed = False
         self.deadline_monotonic = float(deadline_monotonic or 0.0)
-        explicit_proxy = str(proxy or proxy_url or "").strip()
+        explicit_proxy = resolve_backend_explicit_proxy(self.account, proxy, proxy_url)
         self.proxy_profile = proxy_profile or proxy_settings.get_profile(
             account=self.account,
             proxy=explicit_proxy,
@@ -351,6 +447,8 @@ class OpenAIBackendAPI:
                 proxy=self.proxy_profile.proxy_url,
                 upstream=True,
             ))
+        self._apply_account_session_cookies()
+
     def close(self) -> None:
         if getattr(self, "_closed", False):
             return
@@ -365,7 +463,26 @@ class OpenAIBackendAPI:
     def __del__(self):
         self.close()
 
-    def _deadline_timeout(self, maximum: float, message: str = "image request deadline exceeded") -> float:
+    def _apply_account_session_cookies(self) -> None:
+        cookies = self.account.get("cookies") if isinstance(self.account, dict) else None
+        if not isinstance(cookies, dict):
+            return
+        jar = getattr(self.session, "cookies", None)
+        setter = getattr(jar, "set", None)
+        for name, value in cookies.items():
+            name_text = str(name or "").strip()
+            value_text = str(value or "").strip()
+            if not name_text or not value_text:
+                continue
+            try:
+                if callable(setter):
+                    setter(name_text, value_text)
+                else:
+                    jar[name_text] = value_text
+            except Exception:
+                continue
+
+    def _deadline_timeout(self, maximum: float, message: str = "图片请求超过截止时间。") -> float:
         limit = max(0.001, float(maximum))
         deadline = float(getattr(self, "deadline_monotonic", 0.0) or 0.0)
         if deadline <= 0:
@@ -604,7 +721,7 @@ class OpenAIBackendAPI:
 
     def _raise_on_error(self, response: Any, path: str) -> None:
         if response.status_code == 401:
-            raise InvalidAccessTokenError(f"token invalidated ({path})")
+            raise InvalidAccessTokenError(f"Token 已失效（HTTP 401，{path}）。")
         body: Any = getattr(response, "text", "")
         try:
             body = response.json()
@@ -662,7 +779,7 @@ class OpenAIBackendAPI:
     def get_user_info(self) -> Dict[str, Any]:
         """获取当前 token 的账号信息。"""
         if not self.access_token:
-            raise RuntimeError("access_token is required")
+            raise RuntimeError("当前操作需要 access_token。")
         executor = ThreadPoolExecutor(max_workers=3)
         try:
             me_future = executor.submit(self._get_me)
@@ -747,7 +864,7 @@ class OpenAIBackendAPI:
     def _build_requirements(self, data: Dict[str, Any], source_p: str = "") -> ChatRequirements:
         """把 sentinel 响应整理成后续对话需要的 token 集合。"""
         if (data.get("arkose") or {}).get("required"):
-            raise RuntimeError("chat requirements requires arkose token, which is not implemented")
+            raise RuntimeError("当前对话需要 Arkose 验证，暂不支持。")
 
         proof_token = ""
         proof_info = data.get("proofofwork") or {}
@@ -865,6 +982,7 @@ class OpenAIBackendAPI:
             model: str,
             timezone: str,
             thinking_effort: str = "",
+            history_and_training_disabled: bool = True,
     ) -> Dict[str, Any]:
         """把标准 messages 构造成 web 对话请求体。"""
         payload = {
@@ -878,7 +996,7 @@ class OpenAIBackendAPI:
             "force_paragen_model_slug": "",
             "force_rate_limit": False,
             "force_use_sse": True,
-            "history_and_training_disabled": True,
+            "history_and_training_disabled": bool(history_and_training_disabled),
             "reset_rate_limits": False,
             "suggestions": [],
             "supported_encodings": [],
@@ -1048,7 +1166,11 @@ class OpenAIBackendAPI:
 
     @staticmethod
     def _stream_timeout_message(timeout_secs: float) -> str:
-        return f"SSE stream exceeded {timeout_secs:.0f}s" if timeout_secs >= 1 else f"SSE stream exceeded {timeout_secs:.3f}s"
+        return (
+            f"SSE 流超过 {timeout_secs:.0f} 秒。"
+            if timeout_secs >= 1
+            else f"SSE 流超过 {timeout_secs:.3f} 秒。"
+        )
 
     @staticmethod
     def _iter_codex_response_events(raw: Any, max_duration_secs: float | None = None) -> Iterator[Dict[str, Any]]:
@@ -1218,7 +1340,7 @@ class OpenAIBackendAPI:
             quality: str = "auto",
     ) -> Iterator[Dict[str, Any]]:
         if not self.access_token:
-            raise RuntimeError("access_token is required for codex image endpoints")
+            raise RuntimeError("Codex 图片接口需要 access_token。")
         self._ensure_codex_source_account()
         path = "/backend-api/codex/responses"
         payload = {
@@ -1447,57 +1569,11 @@ class OpenAIBackendAPI:
     def _start_image_generation(self, prompt: str, requirements: ChatRequirements, conduit_token: str, model: str,
                                 references: Optional[list[Dict[str, Any]]] = None) -> requests.Response:
         """启动图片生成或编辑的 SSE 请求。"""
-        references = references or []
-        parts = [{
-            "content_type": "image_asset_pointer",
-            "asset_pointer": f"file-service://{item['file_id']}",
-            "width": item["width"],
-            "height": item["height"],
-            "size_bytes": item["file_size"],
-        } for item in references]
-        parts.append(prompt)
-        content = {"content_type": "multimodal_text", "parts": parts} if references else {"content_type": "text",
-                                                                                          "parts": [prompt]}
-        metadata = {
-            "developer_mode_connector_ids": [],
-            "selected_github_repos": [],
-            "selected_all_github_repos": False,
-            "system_hints": ["picture_v2"],
-            "serialization_metadata": {"custom_symbol_offsets": []},
-        }
-        if references:
-            metadata["attachments"] = [{
-                "id": item["file_id"],
-                "mimeType": item["mime_type"],
-                "name": item["file_name"],
-                "size": item["file_size"],
-                "width": item["width"],
-                "height": item["height"],
-            } for item in references]
-        payload = {
-            "action": "next",
-            "messages": [{
-                "id": new_uuid(),
-                "author": {"role": "user"},
-                "create_time": time.time(),
-                "content": content,
-                "metadata": metadata,
-            }],
-            "parent_message_id": new_uuid(),
-            "model": self._image_model_slug(model),
-            "client_prepare_state": "sent",
-            "timezone_offset_min": CHROME146_TIMEZONE_OFFSET_MIN,
-            "timezone": CHROME146_TIMEZONE,
-            "conversation_mode": {"kind": "primary_assistant"},
-            "history_and_training_disabled": True,
-            "enable_message_followups": True,
-            "system_hints": ["picture_v2"],
-            "supports_buffering": True,
-            "supported_encodings": ["v1"],
-            "client_contextual_info": chrome146_client_contextual_info(),
-            "paragen_cot_summary_display_override": "allow",
-            "force_parallel_switch": "auto",
-        }
+        payload = build_picture_v2_start_payload(
+            prompt=prompt,
+            model=self._image_model_slug(model),
+            references=references or [],
+        )
         path = "/backend-api/f/conversation"
         timeout_secs = self._deadline_timeout(config.image_stream_timeout_secs)
         # Keep the transport/curl deadline slightly above the logical SSE
@@ -1716,7 +1792,7 @@ class OpenAIBackendAPI:
             poll_interval_secs: float,
     ) -> EditableFileExportResult:
         if not self.access_token:
-            raise RuntimeError("access_token is required for editable file export")
+            raise RuntimeError("可编辑文件导出需要 access_token。")
         self.client_version = EDITABLE_FILE_CLIENT_VERSION
         self.client_build_number = EDITABLE_FILE_CLIENT_BUILD_NUMBER
         self.session.headers["OAI-Client-Version"] = EDITABLE_FILE_CLIENT_VERSION
@@ -1786,7 +1862,7 @@ class OpenAIBackendAPI:
     ) -> float:
         if deadline is None:
             return maximum
-        return min(maximum, cls._remaining_timeout(deadline, "editable file task timed out"))
+        return min(maximum, cls._remaining_timeout(deadline, "可编辑文件任务超时。"))
 
     def _upload_editable_base64_image(
             self,
@@ -1919,7 +1995,7 @@ class OpenAIBackendAPI:
         requirements = self._get_chat_requirements(
             timeout_secs=self._editable_request_timeout(deadline, 30),
             deadline=deadline,
-            timeout_message="editable file task timed out",
+            timeout_message="可编辑文件任务超时。",
         )
         message: Dict[str, Any] = {"id": new_uuid(), "author": {"role": "user"}, "create_time": time.time()}
         if uploaded:
@@ -2505,7 +2581,7 @@ class OpenAIBackendAPI:
             poll_interval_secs: float = SEARCH_POLL_INTERVAL_SECS,
     ) -> Dict[str, Any]:
         if not self.access_token:
-            raise RuntimeError("access_token is required for search")
+            raise RuntimeError("搜索接口需要 access_token。")
         deadline = time.monotonic() + max(0.001, float(timeout_secs))
         conduit_token = self._prepare_search_conversation(
             prompt,
@@ -2530,7 +2606,7 @@ class OpenAIBackendAPI:
 
     @classmethod
     def _remaining_search_timeout(cls, deadline: float) -> float:
-        return cls._remaining_timeout(deadline, "web search timed out")
+        return cls._remaining_timeout(deadline, "网页搜索超时。")
 
     def _prepare_search_conversation(
             self,
@@ -2657,7 +2733,7 @@ class OpenAIBackendAPI:
                 time.sleep(min(poll_interval_secs, remaining))
         if last_result and last_result.get("answer"):
             return last_result
-        raise TimeoutError("web search timed out")
+        raise TimeoutError("网页搜索超时。")
 
     def _get_search_conversation(
             self,
@@ -3527,8 +3603,8 @@ class OpenAIBackendAPI:
                         if attempt == 0:
                             continue
                         delivery_error = ImageDownloadError(
-                            "image download URL resolution failed: "
-                            f"{diagnostic_excerpt(exc, 500)}"
+                            "图片下载地址解析失败："
+                            f"{diagnostic_excerpt(exc, 20000)}"
                         )
                         resolution_errors.append(
                             (delivery_error.failure, delivery_error)
@@ -3556,7 +3632,7 @@ class OpenAIBackendAPI:
                 if attempt == 0:
                     continue
                 delivery_error = ImageDownloadError(
-                    f"empty download URL for {source} result {asset_id}"
+                    f"{source} 结果 {asset_id} 没有可用的下载地址"
                 )
                 resolution_errors.append((delivery_error.failure, delivery_error))
                 return ""
@@ -3794,7 +3870,7 @@ class OpenAIBackendAPI:
                         or 0
                     )
                     if 300 <= status_code < 400:
-                        raise ImageDownloadError("image download redirect is not allowed")
+                        raise ImageDownloadError("图片下载重定向不被允许。")
                     ensure_ok(
                         response,
                         "image_download",
@@ -3803,7 +3879,7 @@ class OpenAIBackendAPI:
                     headers = getattr(response, "headers", {}) or {}
                     raw_content_length = str(headers.get("content-length") or "").strip()
                     if raw_content_length.isdigit() and int(raw_content_length) > max_bytes:
-                        raise ImageDownloadError("image download exceeds maximum response size")
+                        raise ImageDownloadError("图片下载超过最大响应大小。")
                     iter_content = getattr(response, "iter_content", None)
                     if callable(iter_content):
                         chunks: list[bytes] = []
@@ -3814,7 +3890,7 @@ class OpenAIBackendAPI:
                                 continue
                             received += len(chunk)
                             if received > max_bytes:
-                                raise ImageDownloadError("image download exceeds maximum response size")
+                                raise ImageDownloadError("图片下载超过最大响应大小。")
                             chunks.append(bytes(chunk))
                         content = b"".join(chunks)
                     else:
@@ -3822,11 +3898,11 @@ class OpenAIBackendAPI:
                         if callable(read):
                             content = bytes(read(max_bytes + 1))
                             if len(content) > max_bytes:
-                                raise ImageDownloadError("image download exceeds maximum response size")
+                                raise ImageDownloadError("图片下载超过最大响应大小。")
                         else:
                             content = bytes(getattr(response, "content", b"") or b"")
                             if len(content) > max_bytes:
-                                raise ImageDownloadError("image download exceeds maximum response size")
+                                raise ImageDownloadError("图片下载超过最大响应大小。")
                     _invoke_image_cancel_callback(cancel_callback)
                     if not content:
                         if attempt == 0:
@@ -3836,7 +3912,7 @@ class OpenAIBackendAPI:
                                 "url_host": parsed_url.netloc,
                             })
                             continue
-                        raise ImageDownloadError("image download returned an empty response")
+                        raise ImageDownloadError("图片下载返回了空响应。")
                     if content not in images:
                         images.append(content)
                     break
@@ -3857,7 +3933,7 @@ class OpenAIBackendAPI:
                         })
                         continue
                     raise ImageDownloadError(
-                        f"image download failed: {diagnostic_excerpt(exc, 500)}",
+                        f"图片下载失败：{diagnostic_excerpt(exc, 20000)}",
                         failure=failure,
                     ) from exc
                 finally:
@@ -3874,8 +3950,17 @@ class OpenAIBackendAPI:
             images: Optional[list[str]] = None,
             system_hints: Optional[list[str]] = None,
             thinking_effort: str = "",
+            regular_chat: bool = False,
     ) -> Iterator[str]:
         system_hints = system_hints or []
+        if regular_chat:
+            yield from self._stream_regular_chat_conversation(
+                prompt,
+                model,
+                images or [],
+                messages,
+            )
+            return
         if "picture_v2" in system_hints:
             yield from self._stream_picture_conversation(prompt, model, images or [])
             return
@@ -3906,14 +3991,15 @@ class OpenAIBackendAPI:
             except Exception:
                 pass
 
-    def _stream_picture_conversation(
+    def _stream_regular_chat_conversation(
             self,
             prompt: str,
             model: str,
             images: list[str],
+            messages: Optional[list[Dict[str, Any]]] = None,
     ) -> Iterator[str]:
         if not self.access_token:
-            raise RuntimeError("access_token is required for image endpoints")
+            raise RuntimeError("图片接口需要 access_token。")
         self._report_progress("uploading")
         references = [self._upload_image(image, f"image_{idx}.png") for idx, image in enumerate(images, start=1)]
         self._report_progress("bootstrapping")
@@ -3921,7 +4007,80 @@ class OpenAIBackendAPI:
         self._report_progress("getting_token")
         requirements = self._get_chat_requirements(
             deadline=self.deadline_monotonic or None,
-            timeout_message="image request deadline exceeded",
+            timeout_message="图片请求超过截止时间。",
+        )
+        path, timezone = self._chat_target()
+        payload = self._conversation_payload(
+            messages or [{"role": "user", "content": prompt}],
+            self._image_model_slug(model),
+            timezone,
+            history_and_training_disabled=False,
+        )
+        payload["history_and_training_disabled"] = False
+        payload["system_hints"] = []
+        if references:
+            message = payload["messages"][0] if payload.get("messages") else None
+            if isinstance(message, dict):
+                parts: list[Any] = [
+                    {
+                        "content_type": "image_asset_pointer",
+                        "asset_pointer": f"file-service://{item['file_id']}",
+                        "width": item["width"],
+                        "height": item["height"],
+                        "size_bytes": item["file_size"],
+                    }
+                    for item in references
+                ]
+                existing = message.get("content") if isinstance(message.get("content"), dict) else {}
+                text_parts = existing.get("parts") if isinstance(existing, dict) else [prompt]
+                parts.extend(part for part in (text_parts or []) if not isinstance(part, dict))
+                if prompt and prompt not in parts:
+                    parts.append(prompt)
+                message["content"] = {"content_type": "multimodal_text", "parts": parts}
+                metadata = dict(message.get("metadata") or {})
+                metadata["attachments"] = [{
+                    "id": item["file_id"],
+                    "mimeType": item["mime_type"],
+                    "name": item["file_name"],
+                    "size": item["file_size"],
+                    "width": item["width"],
+                    "height": item["height"],
+                } for item in references]
+                message["metadata"] = metadata
+        self._report_progress("generating")
+        response = self.session.post(
+            self.base_url + path,
+            headers=self._conversation_headers(path, requirements),
+            json=payload,
+            timeout=self._deadline_timeout(config.image_stream_timeout_secs),
+            stream=True,
+        )
+        ensure_ok(response, path)
+        try:
+            yield from self._iter_timed_sse_payloads(
+                response,
+                max_duration_secs=self._deadline_timeout(config.image_stream_timeout_secs),
+                timing_key="regular_chat_stream",
+            )
+        finally:
+            response.close()
+
+    def _stream_picture_conversation(
+            self,
+            prompt: str,
+            model: str,
+            images: list[str],
+    ) -> Iterator[str]:
+        if not self.access_token:
+            raise RuntimeError("图片接口需要 access_token。")
+        self._report_progress("uploading")
+        references = [self._upload_image(image, f"image_{idx}.png") for idx, image in enumerate(images, start=1)]
+        self._report_progress("bootstrapping")
+        self._bootstrap()
+        self._report_progress("getting_token")
+        requirements = self._get_chat_requirements(
+            deadline=self.deadline_monotonic or None,
+            timeout_message="图片请求超过截止时间。",
         )
         self._report_progress("preparing_conversation")
         conduit_token = self._prepare_image_conversation(prompt, requirements, model)
@@ -3963,7 +4122,7 @@ class OpenAIBackendAPI:
             timeout_secs: float = 30.0,
             *,
             deadline: float | None = None,
-            timeout_message: str = "web search timed out",
+            timeout_message: str = "网页搜索超时。",
     ) -> ChatRequirements:
         """获取当前模式对话所需的 sentinel token（prepare + finalize 两步流程）。"""
         deadline = deadline or (self.deadline_monotonic or None)
@@ -3994,7 +4153,7 @@ class OpenAIBackendAPI:
 
         if (prepare_data.get("arkose") or {}).get("required"):
             raise UpstreamChallengeRequiredError(
-                "chat requirements requires an Arkose token"
+                "当前对话需要 Arkose 验证，暂不支持。"
             )
 
         proof_token = ""

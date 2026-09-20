@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from services.account_service import account_service as default_account_service
 from services.register import openai_register
-from services.register.log_redaction import redact_register_log_text
+from services.register.errors import RegisterError, format_register_error
 
 
 MAX_RECOVERY_BATCH = 20
@@ -47,10 +47,8 @@ def _secret_values(row: dict[str, Any]) -> list[str]:
 
 
 def _safe_error(error: object, row: dict[str, Any]) -> str:
-    value = redact_register_log_text(error)
-    for secret in _secret_values(row):
-        value = value.replace(secret, "***")
-    return value[:500]
+    del row
+    return str(error or "")
 
 
 def _read_rows() -> list[dict[str, Any]]:
@@ -78,6 +76,11 @@ def _projection(row: dict[str, Any]) -> dict[str, Any]:
         key: row.get(key)
         for key in (
             "email",
+            "password",
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "register_proxy",
             "source_type",
             "created_at",
             "register_stage",
@@ -94,11 +97,15 @@ def _projection(row: dict[str, Any]) -> dict[str, Any]:
     }
     if "last_error" in projection:
         projection["last_error"] = _safe_error(projection["last_error"], row)
+    if isinstance(row.get("fp"), dict):
+        projection["fp"] = dict(row["fp"])
+    if isinstance(row.get("cookies"), dict):
+        projection["cookies"] = dict(row["cookies"])
     return projection
 
 
 def list_pending_core_results() -> list[dict[str, Any]]:
-    """Return an admin-safe view without access, refresh, id, or mailbox tokens."""
+    """Return pending core-result rows for the admin UI, including tokens."""
     return [_projection(row) for row in _read_rows()]
 
 
@@ -111,13 +118,28 @@ def _reconcile_core_result_unlocked(
 ) -> dict[str, Any]:
     access_token = str(result.get("access_token") or "").strip()
     if not access_token:
-        raise RuntimeError("注册核心结果缺少 access_token")
+        raise RegisterError("token_exchange_failed", "注册核心结果缺少 access_token。", stage="收口")
 
     if verify_fn is None:
         verify_fn = openai_register.verify_registered_account
-    remote_info = verify_fn(access_token, register_proxy=register_proxy)
-    if not isinstance(remote_info, dict):
-        raise RuntimeError("注册账号验活结果格式无效")
+    proxy = str(register_proxy or result.get("register_proxy") or result.get("proxy") or "").strip()
+    warnings: list[str] = []
+    remote_info: dict[str, Any] = {}
+    try:
+        remote_info = _invoke_verify_fn(
+            verify_fn,
+            access_token,
+            register_proxy=proxy,
+            account=result,
+        )
+        if not isinstance(remote_info, dict):
+            raise RegisterError("verify_blocked", "注册账号验活结果格式无效。", stage="收口验活")
+    except Exception as verify_error:
+        warnings.append(format_register_error(verify_error, stage="收口验活"))
+        remote_info = {}
+
+    if str(remote_info.get("quota_warning") or "").strip():
+        warnings.append(str(remote_info.get("quota_warning")))
 
     normalized = {
         **result,
@@ -132,21 +154,52 @@ def _reconcile_core_result_unlocked(
         return_items=False,
     )
     if isinstance(persist_result, dict) and persist_result.get("errors"):
-        raise RuntimeError(f"账号入库失败: {persist_result['errors']}")
+        raise RegisterError(
+            "persist_failed",
+            "账号入库失败。",
+            original=str(persist_result["errors"]),
+            stage="入库",
+        )
 
-    refresh_result = account_service_obj.refresh_accounts([access_token])
-    if not isinstance(refresh_result, dict):
-        raise RuntimeError("账号池刷新结果格式无效")
-    if refresh_result.get("errors"):
-        raise RuntimeError(f"账号池刷新失败: {refresh_result['errors']}")
+    try:
+        refresh_result = account_service_obj.refresh_accounts([access_token])
+        if not isinstance(refresh_result, dict):
+            warnings.append(RegisterError("refresh_failed", "账号池刷新结果格式无效。", stage="刷新号池").format_log())
+        elif refresh_result.get("errors"):
+            warnings.append(
+                RegisterError(
+                    "refresh_failed",
+                    "账号池刷新失败。",
+                    original=str(refresh_result["errors"]),
+                    stage="刷新号池",
+                ).format_log()
+            )
+    except Exception as refresh_error:
+        warnings.append(format_register_error(refresh_error, stage="刷新号池"))
 
     remove_error = openai_register.remove_pending_core_result(access_token)
     if remove_error:
-        raise RuntimeError(f"注册核心暂存结果清理失败: {remove_error}")
+        warnings.append(f"注册核心暂存结果清理失败: {remove_error}")
     return {
         "result": normalized,
-        "warnings": [],
+        "warnings": warnings,
     }
+
+
+def _invoke_verify_fn(
+    verify_fn: Callable[..., dict[str, Any]],
+    access_token: str,
+    *,
+    register_proxy: str = "",
+    account: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    try:
+        return verify_fn(access_token, register_proxy=register_proxy, account=account)
+    except TypeError:
+        try:
+            return verify_fn(access_token, register_proxy=register_proxy)
+        except TypeError:
+            return verify_fn(access_token)
 
 
 def reconcile_core_result(
@@ -244,10 +297,13 @@ def reconcile_pending_core_results(
                         },
                     )
                 except Exception as update_error:
-                    error_text = (
-                        f"{error_text}; recovery state update failed: "
-                        f"{_safe_error(update_error, row)}"
-                    )[:500]
+                    error_text = RegisterError(
+                        "unknown",
+                        "核心结果收口状态更新失败。",
+                        original=f"{error_text}；{_safe_error(update_error, row)}",
+                        stage="入库",
+                        label="收口状态更新失败",
+                    ).format_log()
                 errors.append(f"{row.get('email') or 'pending-result'}: {error_text}")
 
         return {

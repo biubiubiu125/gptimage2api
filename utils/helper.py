@@ -14,6 +14,7 @@ from curl_cffi.requests.exceptions import RequestException
 from curl_cffi.requests.models import STREAM_END
 from fastapi import HTTPException
 from services.browser_fingerprint import CHROME146_USER_AGENT
+from services.protocol.error_response import UPSTREAM_UNAVAILABLE_PUBLIC_MESSAGE
 from utils.log import logger
 
 WEB_IMAGE_MODELS = (
@@ -48,31 +49,31 @@ def _image_extension(mime_type: str) -> str:
 def _decode_json_image_string(value: str, index: int, filename: str | None = None, mime_type: str | None = None) -> tuple[bytes, str, str]:
     text = value.strip()
     if not text:
-        raise HTTPException(status_code=400, detail={"error": "image file is empty"})
+        raise HTTPException(status_code=400, detail={"error": "图片文件为空。"})
     match = DATA_URL_IMAGE_RE.match(text)
     if match:
         resolved_mime = (match.group("mime") or "image/png").lower()
         encoded = match.group("data")
     else:
         if text.startswith(("http://", "https://")):
-            raise HTTPException(status_code=400, detail={"error": "remote image URLs are not supported"})
+            raise HTTPException(status_code=400, detail={"error": "不支持远程图片地址"})
         resolved_mime = (mime_type or "image/png").lower()
         encoded = text
     if resolved_mime == "image/jpg":
         resolved_mime = "image/jpeg"
     if resolved_mime not in SUPPORTED_JSON_IMAGE_MIME_TYPES:
-        raise HTTPException(status_code=400, detail={"error": "unsupported image mime type"})
+        raise HTTPException(status_code=400, detail={"error": "不支持的图片类型"})
     encoded_limit = ((MAX_JSON_IMAGE_BYTES + 2) // 3) * 4 + 4
     if len(encoded) > encoded_limit:
-        raise HTTPException(status_code=400, detail={"error": "image file is too large"})
+        raise HTTPException(status_code=400, detail={"error": "图片文件过大。"})
     try:
         image_data = base64.b64decode(encoded, validate=True)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail={"error": "invalid base64 image data"}) from exc
+        raise HTTPException(status_code=400, detail={"error": "Base64 图片数据无效。"}) from exc
     if not image_data:
-        raise HTTPException(status_code=400, detail={"error": "image file is empty"})
+        raise HTTPException(status_code=400, detail={"error": "图片文件为空。"})
     if len(image_data) > MAX_JSON_IMAGE_BYTES:
-        raise HTTPException(status_code=400, detail={"error": "image file is too large"})
+        raise HTTPException(status_code=400, detail={"error": "图片文件过大。"})
     return image_data, filename or f"image_{index}.{_image_extension(resolved_mime)}", resolved_mime
 
 
@@ -80,7 +81,7 @@ def _extract_json_image_value(item: object) -> tuple[str, str | None, str | None
     if isinstance(item, str):
         return item, None, None
     if not isinstance(item, dict):
-        raise HTTPException(status_code=400, detail={"error": "image entry must be a base64 string or object"})
+        raise HTTPException(status_code=400, detail={"error": "图片条目必须是 base64 字符串或对象"})
     filename = str(item.get("filename") or item.get("file_name") or "").strip() or None
     mime_type = str(item.get("mime_type") or item.get("mimeType") or "").strip() or None
     value = item.get("b64_json") or item.get("base64")
@@ -93,19 +94,19 @@ def _extract_json_image_value(item: object) -> tuple[str, str | None, str | None
         else:
             value = image_url
     if not isinstance(value, str) or not value.strip():
-        raise HTTPException(status_code=400, detail={"error": "image entry must include image data"})
+        raise HTTPException(status_code=400, detail={"error": "图片条目必须包含图片数据"})
     return value, filename, mime_type
 
 
 def normalize_json_edit_images(image: object = None, images: object = None) -> list[tuple[bytes, str, str]]:
     raw_images = images if images is not None else image
     if raw_images is None:
-        raise HTTPException(status_code=400, detail={"error": "image file is required"})
+        raise HTTPException(status_code=400, detail={"error": "必须提供图片文件"})
     entries = raw_images if isinstance(raw_images, list) else [raw_images]
     if not entries:
-        raise HTTPException(status_code=400, detail={"error": "image file is required"})
+        raise HTTPException(status_code=400, detail={"error": "必须提供图片文件"})
     if len(entries) > MAX_JSON_EDIT_IMAGES:
-        raise HTTPException(status_code=400, detail={"error": f"images supports up to {MAX_JSON_EDIT_IMAGES} items"})
+        raise HTTPException(status_code=400, detail={"error": f"最多支持 {MAX_JSON_EDIT_IMAGES} 张图片"})
     normalized = []
     for index, item in enumerate(entries, start=1):
         value, filename, mime_type = _extract_json_image_value(item)
@@ -162,16 +163,12 @@ def is_image_chat_request(body: dict[str, object]) -> bool:
     return isinstance(modalities, list) and "image" in {str(item or "").strip().lower() for item in modalities}
 
 
-_UPSTREAM_BODY_LOG_LIMIT = 500
-
-
 class UpstreamHTTPError(RuntimeError):
     """Raised when an upstream HTTP call returns a non-2xx status.
 
     Carries structured fields (status_code, body, retry_after) so callers can
     branch on status code instead of string-matching on str(exc). The full
-    body is preserved on the instance; the formatted message truncates it
-    to keep log lines reasonable.
+    body is preserved on the instance and in the formatted message.
     """
 
     def __init__(
@@ -198,8 +195,6 @@ class UpstreamHTTPError(RuntimeError):
                 body_str = repr(body)
         else:
             body_str = str(body)
-        if len(body_str) > _UPSTREAM_BODY_LOG_LIMIT:
-            body_str = body_str[:_UPSTREAM_BODY_LOG_LIMIT] + "…[truncated]"
         super().__init__(f"{context} failed: status={status_code}, body={body_str}")
 
 
@@ -241,7 +236,7 @@ def _stream_error_payload(
         return error_builder(exc)
     return {
         "error": {
-            "message": "Upstream service unavailable. Please try again.",
+            "message": UPSTREAM_UNAVAILABLE_PUBLIC_MESSAGE,
             "type": "server_error",
             "code": "upstream_error",
         }
@@ -304,7 +299,7 @@ def anthropic_sse_stream(items) -> Iterator[str]:
             "type": "error",
             "error": {
                 "type": "api_error",
-                "message": "Upstream service unavailable. Please try again.",
+                "message": UPSTREAM_UNAVAILABLE_PUBLIC_MESSAGE,
             },
         }
         yield "event: error\n"
@@ -329,7 +324,7 @@ def iter_sse_payloads(
     aborted = False
 
     def _timeout_error() -> TimeoutError:
-        return TimeoutError(f"SSE stream exceeded {_format_timeout_secs(timeout_secs)}")
+        return TimeoutError(f"SSE 流超过 {_format_timeout_secs(timeout_secs)}。")
 
     def _remaining_secs() -> float | None:
         if timeout_secs <= 0:
@@ -489,12 +484,16 @@ def save_images_from_text(text: str, prefix: str) -> list[Path]:
     return saved_paths
 
 
-def anonymize_token(token: object) -> str:
+def token_fingerprint(token: object) -> str:
     value = str(token or "").strip()
     if not value:
         return "token:empty"
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
     return f"token:{digest}"
+
+
+def anonymize_token(token: object) -> str:
+    return str(token or "").strip()
 
 
 def extract_response_prompt(input_value: object) -> str:
@@ -583,7 +582,9 @@ def _decode_message_image_url(value: object) -> tuple[bytes, str] | None:
     except Exception as exc:
         if isinstance(exc, HTTPException):
             raise
-        raise HTTPException(status_code=400, detail={"error": f"image_url fetch failed: {exc}"}) from exc
+        from services.image_failure import public_image_url_fetch_error_message
+
+        raise HTTPException(status_code=400, detail={"error": public_image_url_fetch_error_message(exc)}) from exc
     return image_data, mime
 
 
@@ -592,9 +593,9 @@ def _decode_message_image_object(item: dict[str, object]) -> tuple[bytes, str] |
     if isinstance(data, (bytes, bytearray)):
         image_data = bytes(data)
         if not image_data:
-            raise HTTPException(status_code=400, detail={"error": "image file is empty"})
+            raise HTTPException(status_code=400, detail={"error": "图片文件为空。"})
         if len(image_data) > MAX_JSON_IMAGE_BYTES:
-            raise HTTPException(status_code=400, detail={"error": "image file is too large"})
+            raise HTTPException(status_code=400, detail={"error": "图片文件过大。"})
         return image_data, str(item.get("mime") or item.get("mime_type") or "image/png")
     for key in ("image_url", "url"):
         image = _decode_message_image_url(item.get(key))
@@ -631,14 +632,14 @@ def extract_image_from_message_content(content: object) -> list[tuple[bytes, str
             if len(images) >= MAX_JSON_IMAGE_INPUTS:
                 raise HTTPException(
                     status_code=400,
-                    detail={"error": f"too many image inputs; maximum is {MAX_JSON_IMAGE_INPUTS}"},
+                    detail={"error": f"图片输入数量过多，最多 {MAX_JSON_IMAGE_INPUTS} 张。"},
                 )
             image = _decode_message_image_url(item.get("image_url") or item.get("url") or item)
         elif item_type in {"input_image", "image"}:
             if len(images) >= MAX_JSON_IMAGE_INPUTS:
                 raise HTTPException(
                     status_code=400,
-                    detail={"error": f"too many image inputs; maximum is {MAX_JSON_IMAGE_INPUTS}"},
+                    detail={"error": f"图片输入数量过多，最多 {MAX_JSON_IMAGE_INPUTS} 张。"},
                 )
             image = _decode_message_image_object(item)
         if image:
@@ -646,7 +647,7 @@ def extract_image_from_message_content(content: object) -> list[tuple[bytes, str
             if total_bytes > MAX_JSON_IMAGE_TOTAL_BYTES:
                 raise HTTPException(
                     status_code=400,
-                    detail={"error": "combined image inputs exceed 100MB limit"},
+                    detail={"error": "图片输入合计大小超过 100MB 限制。"},
                 )
             images.append(image)
     return images
@@ -690,9 +691,9 @@ def parse_image_count(raw_value: object) -> int:
     try:
         value = int(raw_value or 1)
     except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail={"error": "n must be an integer"}) from exc
+        raise HTTPException(status_code=400, detail={"error": "生成数量必须是整数。"}) from exc
     if value < 1 or value > 4:
-        raise HTTPException(status_code=400, detail={"error": "n must be between 1 and 4"})
+        raise HTTPException(status_code=400, detail={"error": "生成数量必须在 1 到 4 之间。"})
     return value
 
 

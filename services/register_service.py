@@ -18,6 +18,7 @@ from services.config import DATA_DIR
 from services.file_lock import file_lock
 from services.register_config_store import create_register_config_store
 from services.register import mail_provider, openai_register
+from services.register.errors import RegisterError
 from services.register.log_redaction import (
     redact_register_log_text,
     redact_register_proxy,
@@ -83,13 +84,21 @@ def _serialize_outlook_pool(credentials: list[dict]) -> str:
 
 
 def _merge_outlook_pool(old_text: str, new_text: str) -> str:
-    """合并已存邮箱池与新导入文本，按邮箱去重，新导入的同名邮箱覆盖旧凭据。"""
-    merged: dict[str, dict] = {}
-    for credential in mail_provider.parse_outlook_credentials(old_text or ""):
-        merged[credential["email"].strip().lower()] = credential
+    """把前端提交的邮箱池当成完整列表。空提交表示不改；同邮箱空密码沿用旧值。"""
+    old_credentials = {
+        credential["email"].strip().lower(): credential
+        for credential in mail_provider.parse_outlook_credentials(old_text or "")
+    }
+    if not str(new_text or "").strip():
+        return _serialize_outlook_pool(list(old_credentials.values()))
+    merged: list[dict] = []
     for credential in mail_provider.parse_outlook_credentials(new_text or ""):
-        merged[credential["email"].strip().lower()] = credential
-    return _serialize_outlook_pool(list(merged.values()))
+        email = credential["email"].strip().lower()
+        old = old_credentials.get(email)
+        if old and not str(credential.get("password") or "").strip():
+            credential["password"] = str(old.get("password") or "")
+        merged.append(credential)
+    return _serialize_outlook_pool(merged)
 
 
 def _outlook_credential_changed(old: dict | None, new: dict) -> bool:
@@ -221,16 +230,7 @@ def _is_provider_display_key_field(key: object) -> bool:
 
 
 def _redact_provider_display_keys(value: object) -> None:
-    if isinstance(value, dict):
-        for key, item in list(value.items()):
-            if _is_provider_display_key_field(key) or _is_provider_secret_field(key):
-                if str(item or "").strip():
-                    value[key] = REGISTER_PROVIDER_SECRET_PLACEHOLDER
-                continue
-            _redact_provider_display_keys(item)
-    elif isinstance(value, list):
-        for item in value:
-            _redact_provider_display_keys(item)
+    del value
 
 
 def _ensure_provider_id(provider: dict) -> str:
@@ -258,7 +258,7 @@ def _ensure_provider_ids_unique(providers: object, *, assign_missing: bool = Tru
         key = (provider_type, provider_id)
         previous = seen.get(key)
         if previous is not None:
-            raise ValueError(f"mail.providers duplicate provider id: {provider_type}:{provider_id}")
+            raise ValueError(f"邮箱服务重复配置：{provider_type}:{provider_id}")
         seen[key] = index
 
 
@@ -295,13 +295,13 @@ def _normalize_window(value: object, default: dict[str, object]) -> dict[str, ob
     time_range = str(raw.get("time_range") or default["time_range"]).strip()
     parts = time_range.split("-")
     if len(parts) != 2:
-        raise ValueError("registration time_range must use HH:MM-HH:MM")
+        raise ValueError("注册时间范围必须使用 HH:MM-HH:MM")
     for part in parts:
         hour, separator, minute = part.partition(":")
         if separator != ":" or not hour.isdigit() or not minute.isdigit():
-            raise ValueError("registration time_range must use HH:MM-HH:MM")
+            raise ValueError("注册时间范围必须使用 HH:MM-HH:MM")
         if not 0 <= int(hour) <= 23 or not 0 <= int(minute) <= 59:
-            raise ValueError("registration time_range is out of range")
+            raise ValueError("注册时间范围超出有效范围")
     return {
         "time_range": time_range,
         "target_available": _bounded_int(
@@ -381,7 +381,7 @@ def _normalize(raw: dict, *, recover_invalid_windows: bool = False) -> dict:
     peak_minutes = _window_minutes(str(cfg["register_peak"]["time_range"]))
     offpeak_minutes = _window_minutes(str(cfg["register_offpeak"]["time_range"]))
     if peak_minutes & offpeak_minutes or len(peak_minutes | offpeak_minutes) != 24 * 60:
-        raise ValueError("registration windows must cover 24 hours without overlap")
+        raise ValueError("注册高峰和低峰窗口必须覆盖 24 小时且不能重叠")
     cfg["proxy"] = _normalize_register_proxy(cfg.get("proxy"))
     cfg["proxy_required"] = True
     cfg.pop("max_inflight_per_proxy", None)
@@ -416,7 +416,12 @@ def _restore_masked_proxy(updates: dict, previous_proxy: object) -> None:
         return
     previous = str(previous_proxy or "").strip()
     incoming = str(updates.get("proxy") or "").strip()
-    if previous and incoming and incoming == redact_register_proxy(previous):
+    if not previous or not incoming:
+        return
+    if incoming == REGISTER_PROVIDER_SECRET_PLACEHOLDER:
+        updates["proxy"] = previous
+        return
+    if incoming == redact_register_proxy(previous):
         updates["proxy"] = previous
 
 
@@ -570,7 +575,7 @@ class RegisterService:
                     elif not enabled and running:
                         self.stop()
                 except Exception as exc:
-                    self._append_log(f"registration auto scheduler error: {exc}", "error")
+                    self._append_log(f"注册自动调度出错：{exc}", "error")
                 if stop_event.wait(interval):
                     break
 
@@ -844,7 +849,7 @@ class RegisterService:
         return self._snapshot(redact=False, reload=True)
 
     def _redact_outlook_pools(self, snapshot: dict) -> None:
-        """整理 outlook_token 邮箱池的对外展示字段，不返回原始凭据。"""
+        """整理 outlook_token 邮箱池的对外展示字段，同时保留原始邮箱凭据。"""
         mail = snapshot.get("mail")
         if not isinstance(mail, dict):
             return
@@ -857,7 +862,6 @@ class RegisterService:
             pool_text = str(provider.get("mailboxes") or "")
             base_credentials = mail_provider.parse_outlook_credentials(pool_text)
             credentials = mail_provider.expand_outlook_aliases(base_credentials, provider)
-            provider.pop("mailboxes", None)
             provider["mailboxes_configured"] = bool(pool_text.strip())
             provider["mailboxes_count"] = len(credentials)
             provider["mailboxes_base_count"] = len(base_credentials)
@@ -934,9 +938,10 @@ class RegisterService:
         return dict(providers[0]) if providers and isinstance(providers[0], dict) else dict(provider)
 
     def _merge_outlook_pools(self, updates: dict) -> None:
-        """对 outlook_token provider：把前端新导入的 mailboxes 与已存池按邮箱合并去重。
+        """对 outlook_token provider：前端提交的 mailboxes 视为完整列表。
 
-        前端只提交新增或覆盖的 mailboxes；凭据不回显，留空表示不改动。
+        留空表示不改动；非空则按提交内容覆盖整个池（删除行即移除）。
+        同邮箱若密码留空，沿用已保存密码。
         只按稳定 provider ID 合并；无 ID 仅允许池中唯一的同类型 provider 兼容旧配置。
         """
         mail = updates.get("mail")
@@ -971,12 +976,12 @@ class RegisterService:
                 credential["email"].strip().lower(): credential
                 for credential in mail_provider.parse_outlook_credentials(old_text or "")
             }
-            new_credentials = mail_provider.parse_outlook_credentials(new_text or "")
             if new_text.strip():
                 provider["mailboxes"] = _merge_outlook_pool(old_text, new_text)
+                merged_credentials = mail_provider.parse_outlook_credentials(provider["mailboxes"])
                 refreshed_credentials = [
                     credential
-                    for credential in new_credentials
+                    for credential in merged_credentials
                     if _outlook_credential_changed(old_credentials.get(credential["email"].strip().lower()), credential)
                 ]
                 if refreshed_credentials:
@@ -1107,7 +1112,7 @@ class RegisterService:
                         if self._set_runtime_lease_locked("running"):
                             self._save_unlocked()
                             start_runner = True
-                            start_log = f"register task started: mode={self._config['mode']}, threads={active_threads}"
+                            start_log = f"注册任务已启动：模式={self._config['mode']}，线程={active_threads}"
                         else:
                             # The compare-and-set lost a race to another
                             # worker. Its shared state is authoritative.
@@ -1130,14 +1135,14 @@ class RegisterService:
                 if self._runtime_lease_active_locked() or (self._runner and self._runner.is_alive()):
                     self._mark_runtime_stopping_locked()
                 self._save_unlocked()
-        self._append_log("registration stop requested; waiting for running tasks to finish", "yellow")
+        self._append_log("已请求停止注册，正在等待进行中的任务结束", "yellow")
         return self.get()
 
     def shutdown(self, timeout: float | None = None) -> dict | bool:
         self._shutdown_event.set()
         cancelled = self._cancel_pending_registration_futures()
         if cancelled:
-            self._append_log(f"registration shutdown cancelled {cancelled} queued task(s)", "yellow")
+            self._append_log(f"注册关闭已取消 {cancelled} 个排队任务", "yellow")
         with self._lock:
             runner = self._runner
         deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
@@ -1146,7 +1151,7 @@ class RegisterService:
             runner.join(remaining)
         if runner is not None and runner.is_alive():
             self._append_log(
-                "registration shutdown timed out; background registration work is still draining",
+                "注册关闭超时，后台注册任务仍在收尾",
                 "red",
             )
             return False
@@ -1163,7 +1168,7 @@ class RegisterService:
             # database is unavailable.  The executor and runner have already
             # been stopped; return the last in-memory projection so the App
             # lifespan can continue releasing the other services.
-            self._append_log(f"registration shutdown snapshot unavailable: {exc}", "error")
+            self._append_log(f"注册关闭时无法读取快照：{exc}", "error")
             return self._snapshot(redact=True, reload=False)
 
     def reset(self) -> dict:
@@ -1172,7 +1177,7 @@ class RegisterService:
             with file_lock(self._lock_path()):
                 self._config = self._load_unlocked()
                 if self._runner and self._runner.is_alive() or self._runtime_lease_active_locked():
-                    raise ValueError("registration runtime is still active; stop it before resetting")
+                    raise ValueError("注册任务仍在运行，请先停止再重置")
                 self._logs = []
                 self._config["stats"] = {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, **pool_metrics, "updated_at": _now()}
                 with openai_register.stats_lock:
@@ -1188,7 +1193,7 @@ class RegisterService:
                 (self._runner and self._runner.is_alive())
                 or self._runtime_lease_active_locked()
             ):
-                raise ValueError("registration runtime is still active; stop it before resetting Outlook pool")
+                raise ValueError("注册任务仍在运行，请先停止再重置 Outlook 邮箱池")
         if scope == "unused":
             with self._lock:
                 with file_lock(self._lock_path()):
@@ -1224,6 +1229,11 @@ class RegisterService:
             key: core_result.get(key)
             for key in (
                 "email",
+                "password",
+                "access_token",
+                "refresh_token",
+                "id_token",
+                "register_proxy",
                 "source_type",
                 "created_at",
             )
@@ -1231,17 +1241,27 @@ class RegisterService:
         }
         if isinstance(core_result.get("fp"), dict):
             payload["fp"] = core_result["fp"]
-        parts = [
-            "注册核心结果未入库，等待自动收口",
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-        ]
         recovery_file = str(worker_result.get("recovery_file") or "").strip()
+        original_parts = []
+        if payload:
+            original_parts.append(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         if recovery_file:
-            parts.append(f"核心结果暂存文件: {recovery_file}")
-        error_text = str(worker_result.get("error") or "").strip()
-        if error_text:
-            parts.append(f"失败原因: {error_text}")
-        self._append_log("；".join(parts), "error")
+            original_parts.append(f"核心结果暂存文件={recovery_file}")
+        index = worker_result.get("index")
+        try:
+            index = int(index) if index is not None else None
+        except (TypeError, ValueError):
+            index = None
+        self._append_log(
+            RegisterError(
+                "unknown",
+                str(worker_result.get("error") or "").strip() or "注册核心结果未入库，等待自动收口",
+                stage="入库",
+                original="，".join(original_parts),
+                label="核心结果未入库",
+            ).format_log(index=index),
+            "error",
+        )
 
     def _pool_metrics(
         self,

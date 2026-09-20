@@ -84,6 +84,9 @@ FAILURE_POLICIES: dict[str, FailurePolicy] = {
     "invalid_image_result": FailurePolicy(
         "delivery", None, True, 502, "server_error",
     ),
+    "image_task_not_found": FailurePolicy(
+        "request", None, False, 404, "invalid_request_error",
+    ),
     "image_job_failed": FailurePolicy(
         "internal", None, False, 500, "server_error",
     ),
@@ -168,6 +171,9 @@ FAILURE_POLICIES: dict[str, FailurePolicy] = {
         "request", None, False, 400, "invalid_request_error",
     ),
     "upstream_text_reply": FailurePolicy(
+        "request", None, False, 400, "invalid_request_error",
+    ),
+    "conversation_mode_blocked": FailurePolicy(
         "request", None, False, 400, "invalid_request_error",
     ),
     "no_image_generated": FailurePolicy(
@@ -255,6 +261,27 @@ def is_text_review_failure_code(value: Any) -> bool:
     return normalized in TEXT_REVIEW_FAILURE_CODES
 
 
+_CONVERSATION_MODE_BLOCKED_MARKERS = (
+    "无法调用图片生成工具",
+    "请切换到普通聊天",
+    "cannot use the image generation tool",
+    "switch to a regular chat",
+    "switch to regular chat",
+    "conversation_mode_blocked",
+)
+
+
+def looks_like_conversation_mode_blocked(value: Any) -> bool:
+    text = _safe_public_text(value) or str(value or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(
+        marker in text or marker.lower() in lowered
+        for marker in _CONVERSATION_MODE_BLOCKED_MARKERS
+    )
+
+
 def should_switch_image_account(error_code: object) -> bool:
     """Return True when a failed job should retry on a different upstream account."""
 
@@ -290,50 +317,99 @@ def image_failure(
     )
 
 
-IMAGE_TIMEOUT_PUBLIC_MESSAGE = "Image generation timed out. Please try again."
-IMAGE_TOOL_ERROR_PUBLIC_MESSAGE = "The image generation tool encountered an error. Please try again."
-IMAGE_QUOTA_PUBLIC_MESSAGE = "No image generation quota is currently available."
-IMAGE_QUEUE_UNAVAILABLE_PUBLIC_MESSAGE = "Image queue is temporarily unavailable. Please try again."
-IMAGE_QUEUE_STORAGE_FULL_PUBLIC_MESSAGE = "Image queue storage is full. Please try again later."
+IMAGE_TIMEOUT_PUBLIC_MESSAGE = "图片生成超时，请稍后重试。"
+IMAGE_TOOL_ERROR_PUBLIC_MESSAGE = "图片生成工具出错，请稍后重试。"
+IMAGE_QUOTA_PUBLIC_MESSAGE = "当前没有可用的图片生成额度。"
+IMAGE_QUEUE_UNAVAILABLE_PUBLIC_MESSAGE = "图片队列暂时不可用，请稍后重试。"
+IMAGE_QUEUE_STORAGE_FULL_PUBLIC_MESSAGE = "图片队列存储已满，请稍后重试。"
+CONVERSATION_MODE_BLOCKED_PUBLIC_MESSAGE = "无法在当前会话中调用图片生成工具，请稍后重试。"
+UNSUPPORTED_MODEL_PUBLIC_MESSAGE = "当前模型不支持图片生成。"
+IMAGE_INPUT_INVALID_PUBLIC_MESSAGE = "参考图无效，请更换后重试。"
+NO_IMAGE_GENERATED_PUBLIC_MESSAGE = "未生成图片，请稍后重试。"
+QUOTA_COMMIT_FAILED_PUBLIC_MESSAGE = "图片任务已创建，但额度状态未能提交；请查询任务或使用相同幂等键重试。"
+EDITABLE_QUOTA_COMMIT_FAILED_PUBLIC_MESSAGE = "可编辑文件任务已创建，但额度状态未能提交；请查询任务或使用相同 client_task_id 重试。"
+IDEMPOTENCY_CONFLICT_PUBLIC_MESSAGE = "该请求与已有图片任务冲突，请更换幂等键或查询已有任务。"
+EDITABLE_IDEMPOTENCY_KEY_REQUIRED_PUBLIC_MESSAGE = "可编辑文件任务必须提供 Idempotency-Key、X-NewAPI-Request-Id、X-OneAPI-Request-Id 或 client_task_id。"
+TASK_STATE_CONFLICT_PUBLIC_MESSAGE = "当前任务状态不允许该操作。"
+TASK_ACK_REQUIRES_COMPLETED_PUBLIC_MESSAGE = "只有成功或部分完成的图片结果才能确认。"
+TASK_RESULT_NO_LONGER_AVAILABLE_PUBLIC_MESSAGE = "可交付的图片结果已不可用。"
+IMAGE_QUEUE_RESTORE_REQUIRES_EMPTY_DATABASE_PUBLIC_MESSAGE = "图片队列恢复要求数据库为空。"
 
 
 def image_queue_http_message(code: str = "") -> str:
     if str(code or "").strip() == "image_queue_storage_full":
-        return IMAGE_QUEUE_STORAGE_FULL_PUBLIC_MESSAGE
-    return IMAGE_QUEUE_UNAVAILABLE_PUBLIC_MESSAGE
-IMAGE_TASK_PENDING_PUBLIC_MESSAGE = (
-    "Image task is still running. Poll the task status and try again."
-)
-IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE = (
-    "The saved image result is unavailable. Please try again."
-)
-IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE = "image task not found"
-IMAGE_DELIVERY_FAILED_PUBLIC_MESSAGE = (
-    "The generated image could not be delivered. Please try again."
-)
+        return public_http_chinese_error(
+            stage="存储已满",
+            reason=IMAGE_QUEUE_STORAGE_FULL_PUBLIC_MESSAGE,
+        )
+    return public_http_chinese_error(
+        stage="队列不可用",
+        reason=IMAGE_QUEUE_UNAVAILABLE_PUBLIC_MESSAGE,
+    )
 
-_PUBLIC_RAW_DETAIL_CODES = frozenset({
-    "content_policy_violation",
-    "image_quota_exhausted",
-    "invalid_image_input",
-    "no_image_generated",
-    "upstream_rate_limited",
-    "upstream_text_reply",
-    "unsupported_model",
-})
+
+IMAGE_TASK_PENDING_PUBLIC_MESSAGE = "图片任务仍在执行，请继续查询任务状态。"
+IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE = "已保存的图片结果不可用，请稍后重试。"
+IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE = "找不到该图片任务。"
+IMAGE_DELIVERY_FAILED_PUBLIC_MESSAGE = "生成的图片无法交付，请稍后重试。"
 
 _DIRECT_PUBLIC_TEXT_CODES = frozenset({
     "content_policy_violation",
     "invalid_image_input",
     "upstream_text_reply",
-    "unsupported_model",
 })
 
-_TOOL_ERROR_PUBLIC_CODES = frozenset({
-    "image_tool_error",
-    "image_stream_interrupted",
-    "image_stream_timeout",
-})
+CONTENT_POLICY_VIOLATION_PUBLIC_MESSAGE = "内容未通过审核，请修改后重试。"
+RATE_LIMITED_PUBLIC_MESSAGE = "请求过于频繁，请稍后重试。"
+AUTH_INVALID_PUBLIC_MESSAGE = "账号凭证无效，请稍后重试。"
+NO_AVAILABLE_ACCOUNT_PUBLIC_MESSAGE = "当前没有可用的上游账号。"
+TASK_INTERRUPTED_PUBLIC_MESSAGE = "图片任务已中断，请稍后重试。"
+DURABLE_CONTEXT_REQUIRED_PUBLIC_MESSAGE = "图片生成必须走持久化图片队列。"
+_PUBLIC_FOUR_SEGMENT_PREFIX = "对话生图失败【"
+
+_PUBLIC_IMAGE_ERROR_SPECS: dict[str, tuple[str, str]] = {
+    "upstream_error": ("工具出错", IMAGE_TOOL_ERROR_PUBLIC_MESSAGE),
+    "conversation_not_ready": ("会话未就绪", IMAGE_TOOL_ERROR_PUBLIC_MESSAGE),
+    "internal_error": ("内部错误", IMAGE_TOOL_ERROR_PUBLIC_MESSAGE),
+    "durable_context_required": ("必须走队列", DURABLE_CONTEXT_REQUIRED_PUBLIC_MESSAGE),
+    "image_task_pending": ("任务进行中", IMAGE_TASK_PENDING_PUBLIC_MESSAGE),
+    "invalid_image_result": ("结果不可用", IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE),
+    "image_task_not_found": ("任务不存在", IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE),
+    "image_job_failed": ("任务失败", IMAGE_TOOL_ERROR_PUBLIC_MESSAGE),
+    "image_url_unreachable": ("交付失败", IMAGE_DELIVERY_FAILED_PUBLIC_MESSAGE),
+    "image_claim_timeout": ("超时", IMAGE_TIMEOUT_PUBLIC_MESSAGE),
+    "local_artifact_unavailable": ("结果不可用", IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE),
+    "worker_local_recovery_unavailable": ("结果不可用", IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE),
+    "recovery_account_unavailable": ("结果不可用", IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE),
+    "queue_timeout": ("超时", IMAGE_TIMEOUT_PUBLIC_MESSAGE),
+    "legacy_interrupted": ("任务中断", TASK_INTERRUPTED_PUBLIC_MESSAGE),
+    "legacy_failed": ("任务失败", IMAGE_TOOL_ERROR_PUBLIC_MESSAGE),
+    "image_queue_unavailable": ("队列不可用", IMAGE_QUEUE_UNAVAILABLE_PUBLIC_MESSAGE),
+    "image_queue_resource_pressure": ("队列不可用", IMAGE_QUEUE_UNAVAILABLE_PUBLIC_MESSAGE),
+    "image_queue_storage_full": ("存储已满", IMAGE_QUEUE_STORAGE_FULL_PUBLIC_MESSAGE),
+    "upstream_unavailable": ("上游不可用", IMAGE_TOOL_ERROR_PUBLIC_MESSAGE),
+    "upstream_challenge_required": ("上游挑战", IMAGE_QUEUE_UNAVAILABLE_PUBLIC_MESSAGE),
+    "upstream_connection_failed": ("连接失败", IMAGE_TOOL_ERROR_PUBLIC_MESSAGE),
+    "upstream_connection_timeout": ("超时", IMAGE_TIMEOUT_PUBLIC_MESSAGE),
+    "upstream_rate_limited": ("限流", RATE_LIMITED_PUBLIC_MESSAGE),
+    "image_poll_timeout": ("超时", IMAGE_TIMEOUT_PUBLIC_MESSAGE),
+    "image_stream_timeout": ("超时", IMAGE_TIMEOUT_PUBLIC_MESSAGE),
+    "image_stream_interrupted": ("工具出错", IMAGE_TOOL_ERROR_PUBLIC_MESSAGE),
+    "image_tool_error": ("工具出错", IMAGE_TOOL_ERROR_PUBLIC_MESSAGE),
+    "image_quota_exhausted": ("额度不足", IMAGE_QUOTA_PUBLIC_MESSAGE),
+    "file_upload_throttled": ("限流", RATE_LIMITED_PUBLIC_MESSAGE),
+    "auth_invalid": ("鉴权失败", AUTH_INVALID_PUBLIC_MESSAGE),
+    "content_policy_violation": ("内容审核", CONTENT_POLICY_VIOLATION_PUBLIC_MESSAGE),
+    "invalid_image_input": ("参考图无效", IMAGE_INPUT_INVALID_PUBLIC_MESSAGE),
+    "upstream_text_reply": ("上游返回文本", IMAGE_TOOL_ERROR_PUBLIC_MESSAGE),
+    "conversation_mode_blocked": ("会话限制", CONVERSATION_MODE_BLOCKED_PUBLIC_MESSAGE),
+    "no_image_generated": ("未出图", NO_IMAGE_GENERATED_PUBLIC_MESSAGE),
+    "unsupported_model": ("模型不支持", UNSUPPORTED_MODEL_PUBLIC_MESSAGE),
+    "image_download_failed": ("交付失败", IMAGE_DELIVERY_FAILED_PUBLIC_MESSAGE),
+    "task_interrupted": ("任务中断", TASK_INTERRUPTED_PUBLIC_MESSAGE),
+    "no_available_account": ("无可用账号", NO_AVAILABLE_ACCOUNT_PUBLIC_MESSAGE),
+    "insufficient_quota": ("额度不足", IMAGE_QUOTA_PUBLIC_MESSAGE),
+}
 
 def _is_structured_text_payload(text: str) -> bool:
     candidate = text.strip()
@@ -361,17 +437,98 @@ def _is_structured_failure_code(text: str) -> bool:
 _PUBLIC_URL_RE = re.compile(
     r"(?i)\b(?:https?|socks5h?|socks5|postgres(?:ql)?(?:\+\w+)?)://[^\s\"'<>]+"
 )
+_PUBLIC_BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+_PUBLIC_SECRET_RE = re.compile(
+    r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie|access_token|"
+    r"refresh_token|id[_-]?token|api[_-]?key|password|secret|token)\b(\s*[:=]\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+)
 
 
 def redact_public_urls(text: str) -> str:
     return _PUBLIC_URL_RE.sub("[url redacted]", str(text or ""))
 
 
-IMAGE_URL_FETCH_FAILED_PUBLIC_MESSAGE = "image_url fetch failed"
+def redact_public_secrets(text: str) -> str:
+    value = redact_public_urls(str(text or ""))
+    value = _PUBLIC_BEARER_RE.sub("Bearer [redacted]", value)
+    return _PUBLIC_SECRET_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[redacted]", value)
+
+
+def is_formatted_public_chinese_error(text: str) -> bool:
+    return str(text or "").startswith(_PUBLIC_FOUR_SEGMENT_PREFIX)
+
+
+def format_public_chinese_error(*, stage: str, reason: str, original: str = "") -> str:
+    original_text = redact_public_secrets(original).strip()
+    if is_formatted_public_chinese_error(original_text):
+        return original_text
+    text = f"{_PUBLIC_FOUR_SEGMENT_PREFIX}{stage}】：{reason}".rstrip()
+    if original_text and original_text not in text:
+        text = f"{text} 原文「{original_text}」"
+    return text
+
+
+def public_error_original(text: str) -> str:
+    value = str(text or "").strip()
+    marker = " 原文「"
+    if is_formatted_public_chinese_error(value) and marker in value and value.endswith("」"):
+        return value.rsplit(marker, 1)[1][:-1]
+    return value
+
+
+def public_error_reason(text: str) -> str:
+    value = str(text or "").strip()
+    if not is_formatted_public_chinese_error(value):
+        return value
+    _, sep, rest = value.partition("】：")
+    if not sep:
+        return value
+    marker = " 原文「"
+    if marker in rest:
+        rest = rest.split(marker, 1)[0]
+    return rest.strip()
+
+
+def public_http_chinese_error(*, stage: str, reason: str, original: str = "") -> str:
+    reason_text = str(reason or "").strip() or "请求失败。"
+    if is_formatted_public_chinese_error(reason_text):
+        return reason_text
+    return format_public_chinese_error(stage=stage, reason=reason_text, original=original)
+
+
+def _has_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def wrap_public_http_detail(detail: object, *, stage: str = "请求失败") -> object:
+    if isinstance(detail, list):
+        return [wrap_public_http_detail(item, stage=stage) for item in detail]
+    if isinstance(detail, dict):
+        wrapped = dict(detail)
+        message = wrapped.get("message")
+        if isinstance(message, str) and message.strip():
+            wrapped["message"] = public_http_chinese_error(stage=stage, reason=message)
+        error = wrapped.get("error")
+        if isinstance(error, str) and error.strip() and _has_cjk(error):
+            wrapped["error"] = public_http_chinese_error(stage=stage, reason=error)
+        msg = wrapped.get("msg")
+        if isinstance(msg, str) and msg.strip():
+            wrapped["msg"] = public_http_chinese_error(stage=stage, reason=msg)
+        return wrapped
+    if isinstance(detail, str) and detail.strip():
+        return public_http_chinese_error(stage=stage, reason=detail)
+    return detail
+
+
+IMAGE_URL_FETCH_FAILED_PUBLIC_MESSAGE = "参考图下载失败。"
 
 
 def public_image_url_fetch_error_message(_detail: object = None) -> str:
-    return IMAGE_URL_FETCH_FAILED_PUBLIC_MESSAGE
+    return public_http_chinese_error(
+        stage="参考图下载",
+        reason=IMAGE_URL_FETCH_FAILED_PUBLIC_MESSAGE,
+    )
 
 
 def _safe_public_text(value: Any) -> str:
@@ -410,8 +567,8 @@ def _public_upstream_text(
         candidates.append(failure.public_detail)
     if error is not None:
         candidates.append(getattr(error, "raw_upstream_message", None))
-    if failure.code in _PUBLIC_RAW_DETAIL_CODES:
-        candidates.append(failure.raw_detail)
+        candidates.append(getattr(error, "raw_error", None))
+    candidates.append(failure.raw_detail)
     for candidate in candidates:
         if text := _safe_public_text(candidate):
             return text
@@ -422,30 +579,15 @@ def public_image_error_message(
     failure: ImageFailure,
     error: BaseException | None = None,
 ) -> str:
-    if failure.code in {"image_queue_unavailable", "image_queue_resource_pressure"}:
-        return IMAGE_QUEUE_UNAVAILABLE_PUBLIC_MESSAGE
-    if failure.code == "image_queue_storage_full":
-        return IMAGE_QUEUE_STORAGE_FULL_PUBLIC_MESSAGE
-    if failure.code == "image_task_pending":
-        return IMAGE_TASK_PENDING_PUBLIC_MESSAGE
-    if failure.code == "invalid_image_result":
-        return IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE
-    if failure.code in {"image_url_unreachable", "image_download_failed"}:
-        return IMAGE_DELIVERY_FAILED_PUBLIC_MESSAGE
-    if failure.code == "image_poll_timeout":
-        return IMAGE_TIMEOUT_PUBLIC_MESSAGE
-    if failure.code in {"image_stream_interrupted", "image_stream_timeout"}:
-        return IMAGE_TOOL_ERROR_PUBLIC_MESSAGE
-
-    upstream_text = _public_upstream_text(failure, error)
-    if upstream_text:
-        return upstream_text
-
-    if failure.code in _TOOL_ERROR_PUBLIC_CODES:
-        return IMAGE_TOOL_ERROR_PUBLIC_MESSAGE
-    if failure.code in {"image_quota_exhausted", "insufficient_quota"}:
-        return IMAGE_QUOTA_PUBLIC_MESSAGE
-    return IMAGE_TOOL_ERROR_PUBLIC_MESSAGE
+    stage, reason = _PUBLIC_IMAGE_ERROR_SPECS.get(
+        failure.code,
+        ("工具出错", IMAGE_TOOL_ERROR_PUBLIC_MESSAGE),
+    )
+    return format_public_chinese_error(
+        stage=stage,
+        reason=reason,
+        original=_public_upstream_text(failure, error),
+    )
 
 
 class ImageFailureError(RuntimeError):
@@ -517,6 +659,9 @@ class ImageGenerationError(ImageFailureError):
 
     @property
     def public_error(self) -> str:
+        current = str(self.args[0] if self.args else "").strip()
+        if is_formatted_public_chinese_error(current):
+            return redact_public_secrets(current)
         return public_image_error_message(self.failure, self)
 
     def to_openai_error(self) -> dict[str, Any]:
@@ -1213,6 +1358,12 @@ def classify_message_facts(
     )
     if structured_failure is not None:
         return structured_failure
+
+    if looks_like_conversation_mode_blocked(raw_detail):
+        return image_failure(
+            "conversation_mode_blocked",
+            raw_detail=raw_detail,
+        )
 
     if normalized_role == "assistant" and normalized_content_type == "text" and (
         end_turn or is_terminal_message_status(normalized_status)

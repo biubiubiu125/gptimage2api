@@ -84,12 +84,14 @@ def validate_named_postgres_database(url: object, expected_name: str, *, role: s
         return ""
     if not is_postgres_url(normalized):
         raise ValueError(
-            f"{role} database requires a PostgreSQL URL using psycopg2 "
-            "(postgresql:// or postgresql+psycopg2://)"
+            f"{_database_role_label(role)}必须使用 PostgreSQL 地址"
+            "（postgresql:// 或 postgresql+psycopg2://）"
         )
     actual_name = postgres_database_name(normalized)
     if actual_name != expected_name:
-        raise ValueError(f"{role} database must use {expected_name}")
+        raise ValueError(
+            f"{_database_role_label(role)}必须使用数据库名 {expected_name}"
+        )
     return normalized
 
 
@@ -117,8 +119,19 @@ def _normalize_database_role(value: object) -> str:
         "queue": IMAGE_QUEUE_DATABASE_ROLE,
         "imagequeue": IMAGE_QUEUE_DATABASE_ROLE,
         "image-queue": IMAGE_QUEUE_DATABASE_ROLE,
+        "image queue": IMAGE_QUEUE_DATABASE_ROLE,
     }
     return aliases.get(role, role)
+
+
+def _database_role_label(role: object) -> str:
+    raw = str(role or "").strip()
+    key = _normalize_database_role(raw)
+    if key == APP_DATABASE_ROLE:
+        return "应用数据库"
+    if key == IMAGE_QUEUE_DATABASE_ROLE:
+        return "图片队列存储"
+    return f"{raw}数据库" if raw else "数据库"
 
 
 def _marker_table_sql() -> str:
@@ -151,7 +164,7 @@ def read_database_role_marker(connection: Any) -> dict[str, str]:
     except Exception as exc:
         if _is_missing_marker_table_error(exc):
             return {}
-        raise ValueError(f"database role marker could not be read: {exc}") from exc
+        raise ValueError(f"无法读取数据库角色标记：{exc}") from exc
     if not row:
         return {}
     return {
@@ -169,13 +182,15 @@ def ensure_database_role_marker(
 ) -> dict[str, str]:
     expected = _normalize_database_role(expected_role)
     if expected not in {APP_DATABASE_ROLE, IMAGE_QUEUE_DATABASE_ROLE}:
-        raise ValueError(f"unsupported database role: {expected_role}")
+        raise ValueError(f"不支持的数据库角色：{expected_role}")
     if create_if_missing:
         connection.execute(text(_marker_table_sql()))
     marker = read_database_role_marker(connection)
     if not marker:
         if not create_if_missing:
-            raise ValueError(f"database role marker is missing; expected {expected}")
+            raise ValueError(
+                f"数据库角色标记缺失，期望 {_database_role_label(expected)}"
+            )
         connection.execute(
             text(
                 f"INSERT INTO {DATABASE_ROLE_MARKER_TABLE} "
@@ -193,7 +208,12 @@ def validate_database_role_marker(connection: Any, expected_role: object) -> dic
     marker = read_database_role_marker(connection)
     actual = _normalize_database_role(marker.get("role") if marker else "")
     if not actual:
-        raise ValueError(f"database role marker is missing; expected {expected}")
+        raise ValueError(
+            f"数据库角色标记缺失，期望 {_database_role_label(expected)}"
+        )
     if actual != expected:
-        raise ValueError(f"database role mismatch: expected {expected}, got {actual}")
+        raise ValueError(
+            f"数据库角色不匹配：期望 {_database_role_label(expected)}，"
+            f"实际 {_database_role_label(actual)}"
+        )
     return {**marker, "role": actual}

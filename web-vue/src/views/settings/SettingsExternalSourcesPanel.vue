@@ -37,6 +37,7 @@
               <div class="min-w-0">
                 <p class="truncate font-medium text-foreground">{{ pool.name || pool.id }}</p>
                 <p class="mt-1 truncate font-mono text-muted-foreground">{{ pool.base_url }}</p>
+                <p v-if="pool.secret_key" class="mt-1 break-all font-mono text-muted-foreground">{{ pool.secret_key }}</p>
               </div>
               <div class="flex gap-1.5">
                 <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap" :disabled="remoteImportActive" @click="$emit('importCpa', pool)">导入</Button>
@@ -81,7 +82,7 @@
                 <p class="truncate font-medium text-foreground">{{ server.name || server.id }}</p>
                 <p class="mt-1 truncate font-mono text-muted-foreground">{{ server.base_url }}</p>
                 <p class="mt-1 text-muted-foreground">
-                  {{ server.email || '未填邮箱' }} · {{ server.has_api_key ? '已配置 API Key' : '未配置 API Key' }}
+                  {{ server.email || '未填邮箱' }} · {{ server.api_key || (server.has_api_key ? '已配置 API Key' : '未配置 API Key') }}
                   <span v-if="server.group_id"> · 分组 {{ server.group_id }}</span>
                 </p>
               </div>

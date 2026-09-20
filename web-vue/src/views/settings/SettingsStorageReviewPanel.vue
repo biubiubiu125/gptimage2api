@@ -46,10 +46,9 @@
         <FormField label="密码">
           <Input
             v-model="imageStorage.webdav_password"
-            type="password"
             block
             :disabled="fieldReadOnly('image_storage.webdav_password')"
-            :placeholder="imageStorage.has_webdav_password ? '已配置，留空不修改' : '请输入 WebDAV 密码'"
+            placeholder="请输入 WebDAV 密码，留空保存则不修改"
           />
         </FormField>
       </div>
@@ -114,10 +113,9 @@
       <FormField label="API Key">
         <Input
           v-model="settings.ai_review.api_key"
-          type="password"
           block
           :disabled="fieldReadOnly('ai_review.api_key')"
-          :placeholder="settings.ai_review.has_api_key ? '已配置，留空不修改' : 'sk-...'"
+          placeholder="请输入 API Key，留空保存则不修改"
         />
       </FormField>
 

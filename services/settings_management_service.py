@@ -336,10 +336,10 @@ class SettingsManagementService:
             effective, stored = self._snapshots()
             current_revision = self._revision(effective, stored)
             if expected_revision != current_revision:
-                raise SettingsRevisionConflictError("settings revision does not match current configuration")
+                raise SettingsRevisionConflictError("设置版本已变化，请刷新后重试。")
 
             if "base_url" in values and self._environment_base_url():
-                raise ValueError("base_url is read-only while GPTIMAGE2API_BASE_URL is configured")
+                raise ValueError("公开访问地址已由环境变量 GPTIMAGE2API_BASE_URL 锁定，不能在此修改。")
 
             updates = self._storage_updates(values, effective, stored)
             if clear_genbox_push:
@@ -466,9 +466,9 @@ class SettingsManagementService:
                 clearance=ProxyRuntimeClearanceSettings(
                     enabled=_bool(clearance.get("enabled"), False),
                     mode=_enum(clearance.get("mode"), "none", {"none", "manual"}),
-                    cf_cookies="",
+                    cf_cookies=_text(_path_value(stored_proxy_runtime, ("clearance", "cf_cookies"))),
                     has_cf_cookies=bool(_text(_path_value(stored_proxy_runtime, ("clearance", "cf_cookies")))),
-                    cf_clearance="",
+                    cf_clearance=_text(_path_value(stored_proxy_runtime, ("clearance", "cf_clearance"))),
                     has_cf_clearance=bool(_text(_path_value(stored_proxy_runtime, ("clearance", "cf_clearance")))),
                     user_agent=_text(clearance.get("user_agent"), DEFAULT_PROXY_RUNTIME_USER_AGENT) or DEFAULT_PROXY_RUNTIME_USER_AGENT,
                     timeout_sec=normalize_integer_setting(
@@ -554,7 +554,7 @@ class SettingsManagementService:
             ai_review=AIReviewSettings(
                 enabled=_bool(ai_review.get("enabled"), False),
                 base_url=_url(ai_review.get("base_url")),
-                api_key="",
+                api_key=_text(stored_ai_review.get("api_key")),
                 has_api_key=bool(_text(stored_ai_review.get("api_key"))),
                 model=_text(ai_review.get("model")),
                 prompt=_text(ai_review.get("prompt")),
@@ -564,7 +564,7 @@ class SettingsManagementService:
                 mode=_enum(image_storage.get("mode"), "local", {"local", "webdav", "both"}),
                 webdav_url=_url(image_storage.get("webdav_url")),
                 webdav_username=_text(image_storage.get("webdav_username")),
-                webdav_password="",
+                webdav_password=_text(stored_image_storage.get("webdav_password")),
                 has_webdav_password=bool(_text(stored_image_storage.get("webdav_password"))),
                 webdav_root_path=(
                     _text(image_storage.get("webdav_root_path"), str(DEFAULT_IMAGE_STORAGE["webdav_root_path"]))
@@ -576,7 +576,7 @@ class SettingsManagementService:
                 enabled=_bool(genbox_push.get("enabled"), False),
                 base_url=_url(genbox_push.get("base_url")),
                 source_id=_text(genbox_push.get("source_id")),
-                push_key="",
+                push_key=_text(stored_genbox_push.get("push_key")),
                 has_push_key=bool(_text(stored_genbox_push.get("push_key"))),
                 timeout_secs=max(5, min(120, int(genbox_push.get("timeout_secs") or DEFAULT_GENBOX_PUSH["timeout_secs"]))),
                 auto_push_after_studio=_bool(genbox_push.get("auto_push_after_studio"), False),
@@ -586,7 +586,7 @@ class SettingsManagementService:
                 provider="cloudflare_r2",
                 account_id=_text(backup.get("account_id")),
                 access_key_id=_text(backup.get("access_key_id")),
-                secret_access_key="",
+                secret_access_key=_text(stored_backup.get("secret_access_key")),
                 has_secret_access_key=bool(_text(stored_backup.get("secret_access_key"))),
                 bucket=_text(backup.get("bucket")),
                 prefix=_text(backup.get("prefix"), "backups").strip("/") or "backups",
@@ -599,7 +599,7 @@ class SettingsManagementService:
                     backup.get("rotation_keep"),
                 ),
                 encrypt=_bool(backup.get("encrypt"), False),
-                passphrase="",
+                passphrase=_text(stored_backup.get("passphrase")),
                 has_passphrase=bool(_text(stored_backup.get("passphrase"))),
                 include=BackupIncludeSettings(**{
                     key: _bool(backup_include.get(key), bool(default))

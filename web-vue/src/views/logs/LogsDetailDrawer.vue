@@ -52,7 +52,8 @@
         :content="log.requestTextFull || log.requestText"
         @copy="emit('copy', $event)"
       />
-      <DetailTextBlock title="对外错误" :content="log.error" tone="danger" @copy="emit('copy', $event)" />
+      <DetailTextBlock title="对外错误" :content="log.publicError" tone="danger" @copy="emit('copy', $event)" />
+      <DetailTextBlock title="原始错误" :content="log.error" tone="danger" @copy="emit('copy', $event)" />
       <DetailTextBlock title="上游错误" :content="log.rawUpstreamError" tone="danger" @copy="emit('copy', $event)" />
       <DetailTextBlock title="上游文本" :content="log.rawUpstreamMessage" tone="warning" @copy="emit('copy', $event)" />
       <DetailImagePreview

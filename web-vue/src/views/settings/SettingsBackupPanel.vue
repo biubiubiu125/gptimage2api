@@ -50,10 +50,9 @@
         <FormField label="Secret Access Key">
           <Input
             v-model="backup.secret_access_key"
-            type="password"
             block
             :disabled="fieldReadOnly('backup.secret_access_key')"
-            :placeholder="backup.has_secret_access_key ? '已配置，留空不修改' : '请输入 Secret Access Key'"
+            placeholder="请输入 Secret Access Key，留空保存则不修改"
           />
         </FormField>
       </div>
@@ -80,17 +79,16 @@
       <FormField label="加密口令">
         <Input
           v-model="backup.passphrase"
-          type="password"
           block
           :disabled="fieldReadOnly('backup.passphrase')"
-          :placeholder="backup.has_passphrase ? '已配置，留空不修改' : '必须填写加密口令'"
+          placeholder="请输入加密口令，留空保存则不修改"
         />
       </FormField>
 
       <div class="space-y-2">
         <div class="flex flex-wrap items-center justify-between gap-2">
           <p class="text-xs font-medium text-foreground">备份内容</p>
-          <span class="text-xs text-muted-foreground">Application Database 始终包含</span>
+          <span class="text-xs text-muted-foreground">应用数据库始终包含</span>
         </div>
         <div class="settings-check-grid">
           <div

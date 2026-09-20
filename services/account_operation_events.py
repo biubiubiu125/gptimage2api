@@ -64,7 +64,7 @@ def normalize_account_operation_event(
         "action": _clean_action(raw.get("action")),
         "status": status,
         "tone": _STATUS_TONES[status],
-        "message": clean(raw.get("message"), limit=500),
+        "message": clean(raw.get("message"), limit=0),
     }
 
 

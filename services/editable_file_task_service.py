@@ -16,6 +16,13 @@ from services.account_service import (
 )
 from services.config import DATA_DIR
 from services.content_filter import request_text
+from services.editable_file_failure import (
+    EDITABLE_FILE_CONFLICT_PUBLIC_MESSAGE,
+    EDITABLE_FILE_INVALID_ID_PUBLIC_MESSAGE,
+    EDITABLE_FILE_NOT_FOUND_PUBLIC_MESSAGE,
+    EDITABLE_FILE_NOT_TERMINAL_PUBLIC_MESSAGE,
+    public_editable_exception_message,
+)
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.openai_backend_api import EDITABLE_FILE_MODEL, OpenAIBackendAPI
 from services.storage.editable_file_task_repository import EditableFileTaskRepository
@@ -168,9 +175,10 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         "can_download": can_download,
         "can_delete": status in TERMINAL_STATUSES,
     }
-    for key in ("result", "error"):
-        if task.get(key):
-            item[key] = task[key]
+    if task.get("result"):
+        item["result"] = task["result"]
+    if task.get("error"):
+        item["error"] = public_editable_exception_message(task.get("error"))
     return item
 
 
@@ -218,23 +226,57 @@ def _request_can_resume(kind: str, prompt: str, images: list[str]) -> bool:
 
 
 class EditableFileTaskNotFoundError(LookupError):
-    pass
+    code = "editable_file_task_not_found"
+
+    def __init__(self, message: str = "editable file task not found") -> None:
+        super().__init__(message)
+
+    @property
+    def public_message(self) -> str:
+        return EDITABLE_FILE_NOT_FOUND_PUBLIC_MESSAGE
 
 
 class EditableFileTaskConflict(ValueError):
     """Compatibility error for callers using the durable task API."""
 
+    code = "editable_file_conflict"
+
+    @property
+    def public_message(self) -> str:
+        return EDITABLE_FILE_CONFLICT_PUBLIC_MESSAGE
+
 
 class EditableFileTaskNotTerminalError(RuntimeError):
-    pass
+    code = "editable_file_task_not_terminal"
+
+    def __init__(self, message: str = "editable file task is not terminal") -> None:
+        super().__init__(message)
+
+    @property
+    def public_message(self) -> str:
+        return EDITABLE_FILE_NOT_TERMINAL_PUBLIC_MESSAGE
 
 
 class EditableFileTaskInvalidIdError(ValueError):
-    pass
+    code = "invalid_client_task_id"
+
+    def __init__(
+        self,
+        message: str = "client_task_id must be 1-160 characters using letters, numbers, '.', '_' or '-'",
+    ) -> None:
+        super().__init__(message)
+
+    @property
+    def public_message(self) -> str:
+        return EDITABLE_FILE_INVALID_ID_PUBLIC_MESSAGE
 
 
 class EditableFileTaskCleanupError(RuntimeError):
-    pass
+    code = "editable_file_cleanup_failed"
+
+    @property
+    def public_message(self) -> str:
+        return public_editable_exception_message(str(self))
 
 
 class EditableFileTaskService:
@@ -412,11 +454,12 @@ class EditableFileTaskService:
             if not success_recorded:
                 cleanup_paths.append(published_dir)
             cleanup_succeeded = self._remove_directories(cleanup_paths)
-            error = str(exc) or "editable file task failed"
+            raw = str(exc) or "editable file task failed"
             if not cleanup_succeeded:
-                error = f"{error}; generated files could not be removed"
+                raw = f"{raw}; generated files could not be removed"
+            error = public_editable_exception_message(raw)
             self._update_task(key, status=TASK_STATUS_ERROR, error=error, account_email=account_email, ended_ts=time.time())
-            self._log_call(identity, kind, started, request_text(prompt), status="failed", error=error, account_email=account_email)
+            self._log_call(identity, kind, started, request_text(prompt), status="failed", error=raw, account_email=account_email)
         finally:
             with self._lock:
                 self._inflight.discard(key)

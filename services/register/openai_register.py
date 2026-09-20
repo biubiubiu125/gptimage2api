@@ -28,10 +28,18 @@ from services.browser_fingerprint import (
 )
 from services.config import DATA_DIR
 from services.proxy_service import ClearanceBundle, normalize_proxy_url, proxy_settings
+from services.image_failure import InvalidAccessTokenError
 from services.register import mail_provider
+from services.register.errors import (
+    RegisterError,
+    classify_register_error,
+    format_register_error,
+    looks_like_cloudflare,
+)
 from services.register.log_redaction import redact_register_log_text
 from services.register.recovery_crypto import read_secure_json_file, write_secure_json_file
 from services.register.state_machine import RegisterCoreStage, RegisterCoreStateMachine
+from utils.helper import UpstreamHTTPError
 from utils.timezone import TIME_FORMAT, beijing_now_str
 
 config = {
@@ -235,6 +243,33 @@ def _account_fingerprint_payload(
     return payload
 
 
+def _session_cookie_payload(session: Any) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    jar = getattr(session, "cookies", None)
+    if jar is None:
+        return cookies
+    try:
+        items = jar.items() if hasattr(jar, "items") else []
+        for name, value in items:
+            name_text = str(name or "").strip()
+            value_text = str(value or "").strip()
+            if name_text and value_text:
+                cookies[name_text] = value_text
+        if cookies:
+            return cookies
+    except Exception:
+        cookies = {}
+    try:
+        for cookie in jar:
+            name_text = str(getattr(cookie, "name", "") or "").strip()
+            value_text = str(getattr(cookie, "value", "") or "").strip()
+            if name_text and value_text:
+                cookies[name_text] = value_text
+    except Exception:
+        return cookies
+    return cookies
+
+
 def log(text: str, color: str = "") -> None:
     colors = {"red": "\033[31m", "green": "\033[32m", "yellow": "\033[33m"}
     safe_text = redact_register_log_text(text)
@@ -251,32 +286,6 @@ def log(text: str, color: str = "") -> None:
 
 def step(index: int, text: str, color: str = "") -> None:
     log(f"[任务{index}] {text}", color)
-
-
-def classify_register_failure(error: object) -> str:
-    text = str(error or "").lower()
-    mailbox_markers = (
-        "mailbox",
-        "mail_sync",
-        "no_code",
-        "验证码",
-        "verification code",
-        "mail code",
-        "等待注册验证码",
-        "等待 microsoft 登录验证码",
-        "claim",
-        "release_url",
-        "result_url",
-    )
-    if any(marker in text for marker in mailbox_markers):
-        return "mailbox"
-    if any(marker in text for marker in ("sentinel", "oauth", "authorize", "passwordless", "login", "token换取", "token exchange", "token")):
-        return "auth"
-    if any(marker in text for marker in ("cloudflare", "proxy", "tunnel", "connect timeout", "connection", "dns", "ssl", "timeout", "network")):
-        return "network"
-    if any(marker in text for marker in ("register", "create_account", "about-you", "birthdate", "username")):
-        return "account"
-    return "unknown"
 
 
 def _pending_core_result_rows() -> list[dict[str, Any]]:
@@ -318,6 +327,12 @@ def _core_result_recovery_item(result: dict[str, Any], *, reason: object = "", s
     }
     if isinstance(result.get("fp"), dict):
         item["fp"] = dict(result["fp"])
+    for key in ("register_proxy", "proxy", "clearance_user_agent"):
+        value = str(result.get(key) or "").strip()
+        if value:
+            item[key] = value
+    if isinstance(result.get("cookies"), dict):
+        item["cookies"] = dict(result["cookies"])
     return item
 
 
@@ -410,24 +425,29 @@ def _response_json(resp) -> dict:
         return {}
 
 
-def _safe_json_detail(value: object, limit: int = 500) -> str:
+def _safe_json_detail(value: object, limit: int = 0) -> str:
     try:
         encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     except Exception:
         encoded = str(value or "")
-    return redact_register_log_text(encoded[:max(0, int(limit))])
+    if int(limit) > 0:
+        encoded = encoded[: int(limit)]
+    return redact_register_log_text(encoded)
 
 
-def _safe_response_body(resp, limit: int = 500) -> str:
+def _safe_response_body(resp, limit: int = 0) -> str:
     if resp is None:
         return ""
     try:
-        return redact_register_log_text(str(getattr(resp, "text", "") or "")[:max(0, int(limit))])
+        text = str(getattr(resp, "text", "") or "")
     except Exception:
         return ""
+    if int(limit) > 0:
+        text = text[: int(limit)]
+    return redact_register_log_text(text)
 
 
-def _response_debug_detail(resp, limit: int = 800) -> str:
+def _response_debug_detail(resp, limit: int = 0) -> str:
     if resp is None:
         return ""
     data = _response_json(resp)
@@ -440,9 +460,15 @@ def _response_debug_detail(resp, limit: int = 800) -> str:
         if value:
             parts.append(f"{key}={value}")
     if data:
-        parts.append(f"json={redact_register_log_text(json.dumps(data, ensure_ascii=False)[:limit])}")
+        dumped = json.dumps(data, ensure_ascii=False)
+        if limit > 0:
+            dumped = dumped[:limit]
+        parts.append(f"json={redact_register_log_text(dumped)}")
     else:
-        parts.append(f"body={redact_register_log_text(str(getattr(resp, 'text', '') or '')[:limit])}")
+        body = str(getattr(resp, "text", "") or "")
+        if limit > 0:
+            body = body[:limit]
+        parts.append(f"body={redact_register_log_text(body)}")
     return ", ".join(parts)
 
 
@@ -466,9 +492,14 @@ def _is_cloudflare_challenge(resp) -> bool:
 
 
 def _mail_config(register_proxy: str = "") -> dict:
-    del register_proxy
-    mail = config["mail"] if isinstance(config.get("mail"), dict) else {}
-    return {**mail, "api_use_register_proxy": False, "proxy": "direct"}
+    mail = dict(config["mail"]) if isinstance(config.get("mail"), dict) else {}
+    register = str(register_proxy or "").strip() or "direct"
+    mail["_register_proxy"] = register
+    if bool(mail.get("api_use_register_proxy")):
+        mail["proxy"] = register
+    else:
+        mail["proxy"] = str(mail.get("proxy") or "").strip() or "direct"
+    return mail
 
 
 def _authorize_landed_page(resp) -> str:
@@ -496,8 +527,64 @@ def create_mailbox(username: str | None = None, register_proxy: str = "") -> dic
     return mail_provider.create_mailbox(_mail_config(register_proxy), username)
 
 
-def wait_for_code(mailbox: dict, register_proxy: str = "") -> str | None:
-    return mail_provider.wait_for_code(_mail_config(register_proxy), mailbox)
+def _mailbox_wait_timeout_seconds() -> int:
+    mail = config.get("mail") if isinstance(config.get("mail"), dict) else {}
+    try:
+        return max(1, int(mail.get("wait_timeout") or 30))
+    except (TypeError, ValueError):
+        return 30
+
+
+def _mailbox_wait_timeout_error(
+    mailbox: dict | None,
+    *,
+    login: bool = False,
+    register_proxy: str = "",
+) -> RegisterError:
+    mailbox = mailbox if isinstance(mailbox, dict) else {}
+    email = str(mailbox.get("email") or "").strip()
+    provider = str(mailbox.get("provider") or mailbox.get("type") or mailbox.get("source") or "").strip() or "unknown"
+    timeout = _mailbox_wait_timeout_seconds()
+    proxy = str(register_proxy or "").strip() or "direct"
+    original = f"邮箱={email}，来源={provider}，代理={proxy}，wait_timeout={timeout}s"
+    if login:
+        return RegisterError(
+            "mailbox_login_wait_timeout",
+            f"等待 Microsoft 登录验证码超时（{timeout} 秒）。这不是 Cloudflare 拦截。",
+            original=original,
+            stage="等待 Microsoft 登录验证码",
+        )
+    return RegisterError(
+        "mailbox_wait_timeout",
+        f"等待注册验证码超时（{timeout} 秒）。这不是 Cloudflare 拦截。",
+        original=original,
+        stage="等待验证码",
+    )
+
+
+def wait_for_code(mailbox: dict, register_proxy: str = "", *, login: bool = False) -> str:
+    try:
+        code = mail_provider.wait_for_code(_mail_config(register_proxy), mailbox)
+    except RegisterError as exc:
+        if exc.code in {"mailbox_wait_timeout", "mailbox_login_wait_timeout"}:
+            raise _mailbox_wait_timeout_error(
+                mailbox,
+                login=login,
+                register_proxy=register_proxy,
+            ) from exc
+        raise
+    except Exception as exc:
+        classified = classify_register_error(exc, stage="等待验证码")
+        if classified.code in {"mailbox_wait_timeout", "mailbox_login_wait_timeout"}:
+            raise _mailbox_wait_timeout_error(
+                mailbox,
+                login=login,
+                register_proxy=register_proxy,
+            ) from exc
+        raise
+    if str(code or "").strip():
+        return str(code).strip()
+    raise _mailbox_wait_timeout_error(mailbox, login=login, register_proxy=register_proxy)
 
 
 from utils.sentinel import (
@@ -527,7 +614,7 @@ def build_sentinel_token(
 def create_session(proxy: str = "", fingerprint: dict[str, str] | None = None) -> Any:
     proxy = str(proxy or "").strip()
     if not is_register_proxy_url(proxy):
-        raise RuntimeError("registration requires a residential proxy URL")
+        raise RuntimeError("注册必须使用住宅代理地址")
     fp = _browser_fingerprint(fingerprint)
     kwargs = proxy_settings.build_session_kwargs(
         proxy=proxy,
@@ -577,6 +664,15 @@ def _cloudflare_block_message(resp, prefix: str = "被 Cloudflare 拦截", reaso
     debug = _response_debug_detail(resp)
     reason = reason or "clearance 刷新失败或重试后仍失败，请更换 IP/代理重试"
     return f"{prefix}，{reason}: status={status}, {debug}"
+
+
+def _cloudflare_block_error(resp, prefix: str = "被 Cloudflare 拦截", reason: str = "") -> RegisterError:
+    return RegisterError(
+        "cloudflare_block",
+        "请求被 Cloudflare 拦截。这不是 Token 失效，也不是邮箱接码超时。",
+        original=_cloudflare_block_message(resp, prefix=prefix, reason=reason),
+        stage="Cloudflare",
+    )
 
 
 def request_with_local_retry(session: requests.Session, method: str, url: str, retry_attempts: int = 3, **kwargs):
@@ -716,7 +812,7 @@ def _safe_url_for_log(url: str) -> str:
     value = str(url or "").strip()
     if not value:
         return "-"
-    return redact_register_log_text(value)[:300]
+    return redact_register_log_text(value)
 
 
 def _url_path(url: str) -> str:
@@ -769,10 +865,10 @@ def request_platform_oauth_token(
             timeout=60,
         )
     except Exception as error:
-        _append_exchange_error(errors, f"api token 请求异常: {str(error)[:300]}")
+        _append_exchange_error(errors, f"api token 请求异常: {str(error)}")
         return None
     if resp.status_code != 200:
-        _append_exchange_error(errors, f"api token 接口拒绝: status={resp.status_code}, {_response_debug_detail(resp, 500)}")
+        _append_exchange_error(errors, f"api token 接口拒绝: status={resp.status_code}, {_response_debug_detail(resp)}")
         return None
     data = _response_json(resp)
     missing = [key for key in ("access_token", "refresh_token") if not data.get(key)]
@@ -817,7 +913,7 @@ def request_platform_oauth_token_legacy(
             timeout=60,
         )
     except Exception as error:
-        _append_exchange_error(errors, f"legacy token 请求异常: {str(error)[:300]}")
+        _append_exchange_error(errors, f"legacy token 请求异常: {str(error)}")
         return None
     finally:
         if fresh_session:
@@ -830,7 +926,7 @@ def request_platform_oauth_token_legacy(
         return None
     data = _response_json(resp)
     if resp.status_code != 200:
-        _append_exchange_error(errors, f"legacy token 接口拒绝: status={resp.status_code}, {_response_debug_detail(resp, 500)}")
+        _append_exchange_error(errors, f"legacy token 接口拒绝: status={resp.status_code}, {_response_debug_detail(resp)}")
         return None
     missing = [key for key in ("access_token", "refresh_token", "id_token") if not data.get(key)]
     if missing:
@@ -963,7 +1059,7 @@ def exchange_tokens_from_continue_url(
                     f"final={_safe_url_for_log(final_url)}, error={navigation_error}",
                 )
         except Exception as error:
-            _append_exchange_error(errors, f"跟随 continue_url 异常: {str(error)[:300]}")
+            _append_exchange_error(errors, f"跟随 continue_url 异常: {str(error)}")
             callback = None
     code = str((callback or {}).get("code") or "").strip()
     if not code:
@@ -1037,14 +1133,13 @@ class PlatformRegistrar:
         self._register_stage_started_at = time.time()
 
     def _fail_stage(self, error: Exception) -> None:
-        detail = str(error or "").strip()
         machine = getattr(self, "_register_state_machine", None)
         if isinstance(machine, RegisterCoreStateMachine):
-            machine.fail(detail)
+            machine.fail(format_register_error(error, stage=str(getattr(self, "stage", "") or "")))
             self._register_stage = machine.state.value
         else:
             self._register_stage = RegisterCoreStage.FAILED.value
-        self._register_stage_detail = detail
+        self._register_stage_detail = format_register_error(error, stage=str(getattr(self, "stage", "") or ""))
         self._register_stage_started_at = time.time()
 
     def _stage_step(self, index: int, stage: str, text: str, color: str = "") -> None:
@@ -1055,7 +1150,7 @@ class PlatformRegistrar:
     def mark_mailbox_success(self) -> bool:
         if self.mailbox is None:
             self._mailbox_result_ok = False
-            self._mailbox_result_error = "mailbox not initialized"
+            self._mailbox_result_error = "邮箱尚未初始化"
             return False
         if not self._mailbox_result_marked:
             try:
@@ -1169,7 +1264,7 @@ class PlatformRegistrar:
         if _is_cloudflare_challenge(resp):
             bundle = self._refresh_cloudflare_clearance(auth_base, index)
             if bundle is None:
-                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+                raise _cloudflare_block_error(resp, reason=self.clearance_failure_reason)
             resp, error, final_url = _request_trusted_auth_navigation(
                 self.session,
                 target_url,
@@ -1182,7 +1277,7 @@ class PlatformRegistrar:
                 verify=not proxy_settings.should_skip_ssl_verify(),
             )
             if _is_cloudflare_challenge(resp):
-                raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
+                raise _cloudflare_block_error(resp, "Cloudflare clearance 重试仍被拦截")
         if resp is None or resp.status_code != 200:
             err = _response_json(resp).get("error", {}) if resp is not None else {}
             detail = f": {err.get('code', '')} - {err.get('message', '')}".strip(" -") if err else ""
@@ -1242,7 +1337,7 @@ class PlatformRegistrar:
             raise RuntimeError(
                 error
                 or f"login_continue_http_{getattr(resp, 'status_code', 'unknown')}, "
-                f"detail={_safe_json_detail(detail, 300)}"
+                f"detail={_safe_json_detail(detail)}"
             )
         data = _response_json(resp)
         if ((data.get("page") or {}).get("payload") or {}).get("passwordless_disabled"):
@@ -1260,7 +1355,7 @@ class PlatformRegistrar:
             raise RuntimeError(
                 error
                 or f"passwordless_send_otp_http_{getattr(resp, 'status_code', 'unknown')}, "
-                f"detail={_safe_json_detail(detail, 300)}"
+                f"detail={_safe_json_detail(detail)}"
             )
 
     @staticmethod
@@ -1281,9 +1376,7 @@ class PlatformRegistrar:
         mailbox["_received_after"] = datetime.now(timezone.utc).isoformat()
         self._send_passwordless_otp(index)
         self._stage_step(index, "code_wait", "开始等待 Microsoft 登录验证码")
-        code = wait_for_code(mailbox, register_proxy=self.proxy)
-        if not code:
-            raise RuntimeError("等待 Microsoft 登录验证码超时")
+        code = wait_for_code(mailbox, register_proxy=self.proxy, login=True)
         mailbox["_code_received"] = True
         self._mailbox_code_received = True
         step(index, f"收到 Microsoft 登录验证码: {code}")
@@ -1342,13 +1435,13 @@ class PlatformRegistrar:
         if _is_cloudflare_challenge(resp):
             bundle = self._refresh_cloudflare_clearance(auth_base, index)
             if bundle is None:
-                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+                raise _cloudflare_block_error(resp, reason=self.clearance_failure_reason)
             resp, error = send()
             if _is_cloudflare_challenge(resp):
-                raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
+                raise _cloudflare_block_error(resp, "Cloudflare clearance 重试仍被拦截")
         if resp is None or resp.status_code not in (200, 201, 204):
             data = _response_json(resp) if resp is not None else {}
-            detail = f", detail={_safe_json_detail(data, 300)}" if data else ""
+            detail = f", detail={_safe_json_detail(data)}" if data else ""
             raise RuntimeError(error or f"passwordless_send_otp_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
         self.passwordless_signup = True
         step(index, "passwordless signup 验证码发送完成")
@@ -1363,13 +1456,13 @@ class PlatformRegistrar:
         if _is_cloudflare_challenge(resp):
             bundle = self._refresh_cloudflare_clearance(auth_base, index)
             if bundle is None:
-                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+                raise _cloudflare_block_error(resp, reason=self.clearance_failure_reason)
             headers = self._json_headers(f"{auth_base}/create-account/password")
             headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "username_password_create", self.fingerprint)
             headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
             resp, error = request_with_local_retry(self.session, "post", url, json={"username": email, "password": password}, headers=headers, verify=not proxy_settings.should_skip_ssl_verify())
             if _is_cloudflare_challenge(resp):
-                raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
+                raise _cloudflare_block_error(resp, "Cloudflare clearance 重试仍被拦截")
         if resp is None or resp.status_code != 200:
             data = _response_json(resp) if resp is not None else {}
             if data.get("message") == "Failed to create account. Please try again.":
@@ -1395,7 +1488,7 @@ class PlatformRegistrar:
         if _is_cloudflare_challenge(resp):
             bundle = self._refresh_cloudflare_clearance(auth_base, index)
             if bundle is None:
-                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+                raise _cloudflare_block_error(resp, reason=self.clearance_failure_reason)
             resp, error, _final_url = _request_trusted_auth_navigation(
                 self.session,
                 url,
@@ -1408,7 +1501,7 @@ class PlatformRegistrar:
                 verify=not proxy_settings.should_skip_ssl_verify(),
             )
             if _is_cloudflare_challenge(resp):
-                raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
+                raise _cloudflare_block_error(resp, "Cloudflare clearance 重试仍被拦截")
         if resp is None or resp.status_code not in (200, 302):
             raise RuntimeError(error or f"send_otp_http_{getattr(resp, 'status_code', 'unknown')}")
         step(index, "发送验证码完成")
@@ -1451,7 +1544,7 @@ class PlatformRegistrar:
         if _is_cloudflare_challenge(resp):
             bundle = self._refresh_cloudflare_clearance(auth_base, index)
             if bundle is None:
-                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+                raise _cloudflare_block_error(resp, reason=self.clearance_failure_reason)
             resp, error, _final_url = _request_trusted_auth_navigation(
                 self.session,
                 url,
@@ -1464,7 +1557,7 @@ class PlatformRegistrar:
                 verify=not proxy_settings.should_skip_ssl_verify(),
             )
             if _is_cloudflare_challenge(resp):
-                raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
+                raise _cloudflare_block_error(resp, "Cloudflare clearance 重试仍被拦截")
         if resp is None or resp.status_code not in (200, 302):
             debug = _response_debug_detail(resp)
             raise RuntimeError(
@@ -1497,7 +1590,7 @@ class PlatformRegistrar:
         if _is_cloudflare_challenge(resp):
             bundle = self._refresh_cloudflare_clearance(auth_base, index)
             if bundle is None:
-                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+                raise _cloudflare_block_error(resp, reason=self.clearance_failure_reason)
             headers = self._json_headers(f"{auth_base}/about-you")
 
             # 重新生成 Sentinel Token 和 SO Token
@@ -1516,7 +1609,7 @@ class PlatformRegistrar:
             headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
             resp, error = request_with_local_retry(self.session, "post", url, json={"name": name, "birthdate": birthdate}, headers=headers, verify=not proxy_settings.should_skip_ssl_verify())
             if _is_cloudflare_challenge(resp):
-                raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
+                raise _cloudflare_block_error(resp, "Cloudflare clearance 重试仍被拦截")
         if resp is None or resp.status_code not in (200, 302):
             data = _response_json(resp) if resp is not None else {}
             if data.get("message") == "Failed to create account. Please try again.":
@@ -1588,8 +1681,6 @@ class PlatformRegistrar:
                 step(index, "已进入 passwordless signup，不创建本地不可用的随机密码")
                 self._stage_step(index, "code_wait", "开始等待注册验证码")
                 code = wait_for_code(mailbox, register_proxy=self.proxy)
-                if not code:
-                    raise RuntimeError("等待注册验证码超时")
                 mailbox["_code_received"] = True
                 self._mailbox_code_received = True
                 step(index, f"收到注册验证码: {code}")
@@ -1599,7 +1690,11 @@ class PlatformRegistrar:
                 tokens = self._exchange_registered_tokens(index)
             access_token = str(tokens.get("access_token") or "").strip()
             if not access_token:
-                raise RuntimeError("token交换成功但未返回 access_token")
+                raise RegisterError(
+                    "token_exchange_failed",
+                    "token 交换成功但未返回 access_token。",
+                    stage="token 交换",
+                )
             self._set_stage("finalize", f"token 已获取，邮箱 {email} 准备收口")
         except Exception as error:
             self._fail_stage(error)
@@ -1614,12 +1709,17 @@ class PlatformRegistrar:
             "source_type": "web",
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        if self.created_new_account:
-            result["fp"] = _account_fingerprint_payload(
-                self.fingerprint,
-                device_id=self.device_id,
-                session_id=self.session_id,
-            )
+        result["fp"] = _account_fingerprint_payload(
+            self.fingerprint,
+            device_id=self.device_id,
+            session_id=self.session_id,
+        )
+        result["register_proxy"] = str(self.proxy or "").strip()
+        cookies = _session_cookie_payload(self.session)
+        if cookies:
+            result["cookies"] = cookies
+        if str(self.clearance_user_agent or "").strip():
+            result["clearance_user_agent"] = str(self.clearance_user_agent).strip()
         return result
 
 
@@ -1648,42 +1748,62 @@ def worker(index: int) -> dict:
                     mailbox_result_error = str(mailbox_error)
             else:
                 mailbox_mark_ok = bool(getattr(registrar, "mailbox_result_ok", False))
-            failure_class = "postprocess"
-            error_text = f"注册核心已完成，后续处理失败: {error}"
-            if recovery_error:
-                if recovery_file_available:
-                    error_text = f"{error_text}；核心结果已暂存，等待自动收口: {recovery_error}"
-                else:
-                    error_text = f"{error_text}；核心结果暂存失败: {recovery_error}"
-            elif recovery_file_available:
-                error_text = f"{error_text}；核心结果已暂存: {register_core_results_pending_file}"
         else:
             try:
                 mailbox_mark_ok = bool(registrar.mark_mailbox_failure(error))
             except Exception as mailbox_error:
                 mailbox_mark_ok = False
                 mailbox_result_error = str(mailbox_error)
-            failure_class = classify_register_failure(error)
-            error_text = str(error)
         mailbox_result_error = mailbox_result_error or str(
             getattr(registrar, "mailbox_result_error", getattr(registrar, "_mailbox_result_error", "")) or ""
         ).strip()
+        classified = classify_register_error(
+            error,
+            stage=str(getattr(registrar, "stage", "") or ""),
+        )
+        if core_ok:
+            classified = RegisterError(
+                "postprocess_failed",
+                "注册核心已完成，后续处理失败。",
+                stage=classified.stage or "收口",
+                original=classified.format_log(),
+                failure_class="postprocess",
+            )
+        extra_parts: list[str] = []
+        if recovery_error:
+            if recovery_file_available:
+                extra_parts.append(f"核心结果已暂存，等待自动收口: {recovery_error}")
+            else:
+                extra_parts.append(f"核心结果暂存失败: {recovery_error}")
+        elif core_ok and recovery_file_available:
+            extra_parts.append(f"核心结果已暂存: {register_core_results_pending_file}")
         if not mailbox_mark_ok and mailbox_result_error:
-            error_text = f"{error_text}；邮箱结果回写失败: {mailbox_result_error}"
+            extra_parts.append(f"邮箱结果回写失败: {mailbox_result_error}")
+        original = classified.original or classified.reason
+        if extra_parts:
+            original = f"{original}；{'；'.join(extra_parts)}" if original else "；".join(extra_parts)
+        classified = RegisterError(
+            classified.code,
+            classified.reason,
+            stage=classified.stage,
+            original=original,
+            failure_class=classified.failure_class,
+            label=classified.label,
+        )
+        error_text = classified.format_log(index=index, cost=cost)
         with stats_lock:
             stats["done"] += 1
             stats["fail"] += 1
         safe_error_text = redact_register_log_text(error_text)
         failed_from_stage = str(getattr(registrar, "failed_from_stage", "") or "").strip()
-        stage_text = registrar.stage
-        if failed_from_stage:
-            stage_text = f"{stage_text}<-{failed_from_stage}"
-        log(f"任务{index} 注册失败[{failure_class}][{stage_text}]，本次耗时{cost:.1f}s，原因: {safe_error_text}", "red")
+        log(safe_error_text, "red")
         payload = {
             "ok": False,
             "index": index,
             "error": safe_error_text,
-            "failure_class": failure_class,
+            "failure_class": classified.failure_class,
+            "error_code": classified.code,
+            "error_label": classified.label,
             "stage": registrar.stage,
         }
         if failed_from_stage:
@@ -1705,7 +1825,10 @@ def worker(index: int) -> dict:
 
         access_token = str(result.get("access_token") or "").strip()
         if not access_token:
-            return finish_failure(RuntimeError("注册核心未返回 access_token"), core_ok=False)
+            return finish_failure(
+                RegisterError("token_exchange_failed", "注册核心未返回 access_token。", stage="token 交换"),
+                core_ok=False,
+            )
         postprocess_warnings: list[str] = []
         pending_core_record_error = record_pending_core_result(
             result,
@@ -1715,7 +1838,12 @@ def worker(index: int) -> dict:
         )
         if pending_core_record_error:
             return finish_failure(
-                RuntimeError(f"注册核心结果暂存失败: {pending_core_record_error}"),
+                RegisterError(
+                    "persist_failed",
+                    "注册核心结果暂存失败。",
+                    original=pending_core_record_error,
+                    stage="入库",
+                ),
                 core_ok=False,
             )
 
@@ -1752,7 +1880,7 @@ def worker(index: int) -> dict:
 
             handoff = reconcile_core_result(
                 result,
-                register_proxy=registrar.proxy,
+                register_proxy=str(result.get("register_proxy") or registrar.proxy or "").strip(),
                 verify_fn=verify_registered_account,
                 account_service_obj=account_service,
             )
@@ -1760,7 +1888,12 @@ def worker(index: int) -> dict:
             postprocess_warnings.extend(str(item) for item in handoff.get("warnings") or [])
         except Exception as postprocess_error:
             return finish_failure(
-                RuntimeError(f"注册结果收口失败: {postprocess_error}"),
+                RegisterError(
+                    "postprocess_failed",
+                    "注册结果收口失败。",
+                    original=str(postprocess_error),
+                    stage="收口",
+                ),
                 core_ok=True,
                 core_result=result,
                 recovery_error=pending_core_record_error or str(postprocess_error),
@@ -1776,14 +1909,22 @@ def worker(index: int) -> dict:
                 stats["success"] += 1
                 avg = (time.time() - stats["start_time"]) / stats["success"]
             except Exception as stats_error:
-                postprocess_warnings.append(f"统计更新失败: {stats_error}")
+                postprocess_warnings.append(
+                    RegisterError(
+                        "unknown",
+                        "统计更新失败。",
+                        original=str(stats_error),
+                        stage="收口",
+                        label="收口警告",
+                    ).format_log()
+                )
         try:
             if postprocess_warnings:
-                log(f'{result["email"]} 注册核心成功，本次耗时{cost:.1f}s，后续处理警告: {"；".join(postprocess_warnings)}', "yellow")
+                log(f'{result["email"]} 注册核心成功，耗时{cost:.1f}s，后续处理警告: {"；".join(postprocess_warnings)}', "yellow")
             elif avg is not None:
-                log(f'{result["email"]} 注册成功，本次耗时{cost:.1f}s，全局平均每个号注册耗时{avg:.1f}s', "green")
+                log(f'{result["email"]} 注册成功，耗时{cost:.1f}s，全局平均每个号注册耗时{avg:.1f}s', "green")
             else:
-                log(f'{result["email"]} 注册核心成功，本次耗时{cost:.1f}s', "green")
+                log(f'{result["email"]} 注册核心成功，耗时{cost:.1f}s', "green")
         except Exception:
             pass
         payload = {"ok": True, "index": index, "result": result, "stage": registrar.stage}
@@ -1794,24 +1935,59 @@ def worker(index: int) -> dict:
         registrar.close()
 
 
-def verify_registered_account(access_token: str, register_proxy: str = "") -> dict[str, Any]:
-    del register_proxy
+def verify_registered_account(
+    access_token: str,
+    register_proxy: str = "",
+    account: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     token = str(access_token or "").strip()
     if not token:
-        raise RuntimeError("registered account token is empty")
+        raise RegisterError("token_invalid", "注册账号 token 为空。", stage="收口验活")
+    account_payload = dict(account or {}) if isinstance(account, dict) else {}
+    proxy = str(register_proxy or account_payload.get("register_proxy") or account_payload.get("proxy") or "").strip()
+    if proxy:
+        account_payload["proxy"] = proxy
+        account_payload["register_proxy"] = proxy
+    account_payload["access_token"] = token
     from services.openai_backend_api import OpenAIBackendAPI
 
-    with OpenAIBackendAPI(token) as backend:
-        remote_info = backend.get_user_info()
+    try:
+        with OpenAIBackendAPI(token, account=account_payload, proxy=proxy) as backend:
+            remote_info = backend.get_user_info()
+    except InvalidAccessTokenError as exc:
+        raise RegisterError(
+            "token_invalid",
+            "Token 已失效（HTTP 401）。",
+            original=str(exc),
+            stage="收口验活",
+        ) from exc
+    except UpstreamHTTPError as exc:
+        original = str(exc)
+        status = int(getattr(exc, "status_code", 0) or 0)
+        if looks_like_cloudflare(original) or status == 403:
+            code = "cloudflare_block" if looks_like_cloudflare(original) else "verify_blocked"
+            reason = (
+                "请求被 Cloudflare 拦截。这不是 Token 失效，也不是邮箱接码超时。"
+                if code == "cloudflare_block"
+                else "请求被上游拒绝（HTTP 403）。这不是 Token 失效。"
+            )
+            raise RegisterError(code, reason, original=original, stage="收口验活") from exc
+        raise RegisterError("verify_blocked", "收口验活失败。", original=original, stage="收口验活") from exc
     if not isinstance(remote_info, dict):
-        raise RuntimeError("registered account verification returned invalid payload")
+        raise RegisterError("verify_blocked", "收口验活返回结果格式无效。", stage="收口验活")
     if not str(remote_info.get("email") or "").strip() and not str(remote_info.get("user_id") or "").strip():
-        raise RuntimeError("registered account verification returned no user identity")
+        raise RegisterError("verify_blocked", "收口验活没有返回用户身份。", original=str(remote_info), stage="收口验活")
     image_quota_unknown = bool(remote_info.get("image_quota_unknown"))
     try:
         quota = int(remote_info.get("quota") or 0)
     except (TypeError, ValueError):
         quota = 0
     if not image_quota_unknown and quota <= 0:
-        raise RuntimeError("registered account cannot generate images: quota unavailable")
+        remote_info = dict(remote_info)
+        remote_info["quota_warning"] = RegisterError(
+            "quota_unavailable",
+            "注册账号当前没有图片额度，已先入库。",
+            original=f"quota={quota}",
+            stage="收口验活",
+        ).format_log()
     return remote_info

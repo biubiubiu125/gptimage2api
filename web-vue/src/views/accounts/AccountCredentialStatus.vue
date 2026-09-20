@@ -1,6 +1,6 @@
 <template>
   <div class="inline-flex min-w-0 items-center">
-    <HoverCard card-class="w-72" focusable>
+    <HoverCard card-class="w-[28rem]" focusable>
       <span class="inline-flex items-center gap-1.5" aria-label="凭据状态">
         <MetaChip :tone="item.access_token_tone" size="xs" strong>
           {{ item.access_token_label }}
@@ -37,6 +37,10 @@
                 <dt class="text-muted-foreground">到期时间</dt>
                 <dd class="text-right tabular-nums text-foreground">{{ accessExpiresAt }}</dd>
               </div>
+              <div v-if="item.access_token" class="flex items-start justify-between gap-4">
+                <dt class="shrink-0 text-muted-foreground">原文</dt>
+                <dd class="break-all text-right font-mono text-[11px] text-foreground">{{ item.access_token }}</dd>
+              </div>
             </dl>
           </section>
 
@@ -69,6 +73,10 @@
               <div v-if="hasLastTokenRefreshErrorAt" class="flex items-start justify-between gap-4">
                 <dt class="text-muted-foreground">失败时间</dt>
                 <dd class="text-right tabular-nums text-foreground">{{ lastTokenRefreshErrorAt }}</dd>
+              </div>
+              <div v-if="item.refresh_token" class="flex items-start justify-between gap-4">
+                <dt class="shrink-0 text-muted-foreground">原文</dt>
+                <dd class="break-all text-right font-mono text-[11px] text-foreground">{{ item.refresh_token }}</dd>
               </div>
               <div v-if="item.last_token_refresh_error" class="flex items-start justify-between gap-4">
                 <dt class="shrink-0 text-muted-foreground">失败原因</dt>

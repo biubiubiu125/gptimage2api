@@ -33,7 +33,7 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         result = await run_in_threadpool(prompt_library_service.refresh, source_id)
         if result is None:
-            raise HTTPException(status_code=404, detail={"error": "prompt source not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该提示词来源。"})
         return result
 
     @router.post("/api/admin/prompt-sources/{source_id}", response_model=PromptLibraryView)
@@ -52,7 +52,7 @@ def create_router() -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         if result is None:
-            raise HTTPException(status_code=404, detail={"error": "prompt source not found"})
+            raise HTTPException(status_code=404, detail={"error": "找不到该提示词来源。"})
         return result
 
     return router

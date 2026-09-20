@@ -104,6 +104,7 @@ export type AttemptSummary = {
   status_code: number
   error_code: string
   error_label: string
+  error: string
   public_error: string
   upstream_error: string
   upstream_text: string
@@ -134,6 +135,7 @@ export type CallSummary = {
   status_code: number
   error_code: string
   public_error: string
+  error?: string
   image_requested_count: number
   image_succeeded_count: number
   image_failed_count: number
@@ -210,6 +212,7 @@ export type ImageAttempt = {
   slot: number
   attempt: number
   accountEmail: string
+  error: string
   publicError: string
   upstreamError: string
   upstreamText: string
@@ -240,6 +243,7 @@ export type SystemLogRow = {
   requestTextFull: string
   requestTextTruncated: boolean
   error: string
+  publicError: string
   rawUpstreamMessage: string
   rawUpstreamError: string
   urls: string[]
@@ -296,10 +300,20 @@ function prettyJson(value: unknown): string {
   }
 }
 
-export function summarizeLogText(value: string, max = 220): string {
+function formatRawDetail(value: unknown): string {
+  if (typeof value === 'string') {
+    return value
+  }
+  if (Array.isArray(value) || (value && typeof value === 'object')) {
+    return prettyJson(value)
+  }
+  return ''
+}
+
+export function summarizeLogText(value: string, max = 0): string {
   const clean = value.replace(/\s+/g, ' ').trim()
-  if (clean.length <= max) return clean
-  return `${clean.slice(0, max - 1)}…`
+  if (max > 0 && clean.length > max) return `${clean.slice(0, max - 1)}…`
+  return clean
 }
 
 export const formatLogDuration = formatRequestDuration
@@ -315,7 +329,8 @@ export function normalizeSystemLogRow(item: CallSummary, index: number, options:
   const imageUrls = normalizePreviewUrls(previewImageUrl ? [previewImageUrl] : [], options.apiBaseUrl)
   const durationMs = cleanString(item.duration_ms)
   const summary = cleanString(item.summary)
-  const error = cleanString(item.public_error)
+  const error = cleanString(item.error)
+  const publicError = cleanString(item.public_error)
   const imageRequestedCount = normalizeNonNegativeNumber(item.image_requested_count)
   const imageSucceededCount = normalizeNonNegativeNumber(item.image_succeeded_count)
   const imageFailedCount = normalizeNonNegativeNumber(item.image_failed_count)
@@ -347,6 +362,7 @@ export function normalizeSystemLogRow(item: CallSummary, index: number, options:
     requestTextFull: '',
     requestTextTruncated: false,
     error,
+    publicError,
     rawUpstreamMessage: '',
     rawUpstreamError: '',
     urls: previewImageUrl ? [previewImageUrl] : [],
@@ -387,7 +403,7 @@ export function normalizeSystemLogDetail(item: CallDetail, options: NormalizeSys
     status_code: item.status_code,
     error_code: item.error_code,
     public_error: item.public_error,
-    error: item.public_error,
+    error: item.error,
     request_text: item.request_text,
     request_text_full: item.request_text_full,
     request_text_truncated: item.request_text_truncated,
@@ -418,7 +434,9 @@ export function normalizeSystemLogDetail(item: CallDetail, options: NormalizeSys
     imageUrls,
     imageAttempts: attempts,
     detailPresentation: item.detail_presentation,
-    rawJson: prettyJson(rawDetail),
+    rawJson: formatRawDetail(item.raw_detail),
+    error: cleanString(item.error),
+    publicError: cleanString(item.public_error),
   }
 }
 
@@ -470,6 +488,7 @@ function normalizeImageAttempts(value: AttemptSummary[]): ImageAttempt[] {
       slot: Math.max(1, normalizeNonNegativeNumber(item.slot)),
       attempt: Math.max(1, normalizeNonNegativeNumber(item.attempt)),
       accountEmail: cleanString(item.account_email),
+      error: cleanString(item.error),
       publicError: cleanString(item.public_error),
       upstreamError: cleanString(item.upstream_error),
       upstreamText: cleanString(item.upstream_text),
