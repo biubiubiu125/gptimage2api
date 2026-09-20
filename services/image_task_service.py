@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import inspect
@@ -3065,7 +3066,17 @@ class ImageTaskService:
                     "task_id": str(item.id),
                     "error": str(exc),
                 })
-                resolved.append(item)
+                resolved.append(
+                    replace(
+                        item,
+                        status=TaskStatus.FAILED,
+                        error_code="invalid_image_result",
+                        error_message=str(exc),
+                        data=[],
+                        succeeded_jobs=0,
+                        failed_jobs=max(item.failed_jobs, item.required_jobs, 1),
+                    )
+                )
         snapshots = resolved
         active_ids = [item.id for item in snapshots if item.status not in TERMINAL_TASK_STATUSES]
         positions, worker_pause_reason = repository.queue_context(active_ids)

@@ -367,6 +367,14 @@ TASK_INTERRUPTED_PUBLIC_MESSAGE = "图片任务已中断，请稍后重试。"
 DURABLE_CONTEXT_REQUIRED_PUBLIC_MESSAGE = "图片生成必须走持久化图片队列。"
 _PUBLIC_FOUR_SEGMENT_PREFIX = "对话生图失败【"
 
+_PUBLIC_ERROR_OMIT_ORIGINAL_CODES = frozenset({
+    "invalid_image_result",
+    "local_artifact_unavailable",
+    "worker_local_recovery_unavailable",
+    "recovery_account_unavailable",
+    "image_url_unreachable",
+})
+
 _PUBLIC_IMAGE_ERROR_SPECS: dict[str, tuple[str, str]] = {
     "upstream_error": ("工具出错", IMAGE_TOOL_ERROR_PUBLIC_MESSAGE),
     "conversation_not_ready": ("会话未就绪", IMAGE_TOOL_ERROR_PUBLIC_MESSAGE),
@@ -562,6 +570,8 @@ def _public_upstream_text(
     failure: ImageFailure,
     error: BaseException | None = None,
 ) -> str:
+    if failure.code in _PUBLIC_ERROR_OMIT_ORIGINAL_CODES:
+        return ""
     candidates: list[Any] = []
     if failure.public_detail:
         candidates.append(failure.public_detail)

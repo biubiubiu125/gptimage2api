@@ -350,15 +350,7 @@ def _result(
                 except Exception:
                     pass
             original = str(exc or "").strip() or IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE
-            raise ImageGenerationError(
-                IMAGE_RESULT_UNAVAILABLE_PUBLIC_MESSAGE,
-                failure=image_failure(
-                    "invalid_image_result",
-                    raw_detail=original,
-                ),
-                raw_error=original,
-                task_id=task_id,
-            ) from exc
+            raise _unavailable_image_result_error(original, task_id=task_id) from exc
         if response_format == "b64_json":
             item["b64_json"] = base64.b64encode(payload_bytes).decode("ascii")
         else:
