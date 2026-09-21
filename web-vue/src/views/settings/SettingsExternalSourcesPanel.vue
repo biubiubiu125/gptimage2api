@@ -82,7 +82,7 @@
                 <p class="truncate font-medium text-foreground">{{ server.name || server.id }}</p>
                 <p class="mt-1 truncate font-mono text-muted-foreground">{{ server.base_url }}</p>
                 <p class="mt-1 text-muted-foreground">
-                  {{ server.email || '未填邮箱' }} · {{ server.api_key || (server.has_api_key ? '已配置 API Key' : '未配置 API Key') }}
+                  {{ server.email || '未填邮箱' }} · {{ server.api_key || '未配置 API Key' }}
                   <span v-if="server.group_id"> · 分组 {{ server.group_id }}</span>
                 </p>
               </div>

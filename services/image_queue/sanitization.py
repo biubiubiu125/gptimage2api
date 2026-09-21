@@ -3,20 +3,14 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
-from services.image_failure import ImageFailure, public_image_error_message, redact_public_urls
+from services.image_failure import ImageFailure, public_image_error_message, redact_public_secrets, redact_public_urls
 
-_BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _SENSITIVE_KEY_RE = re.compile(
     r"(?i)(^|[_-])("
     r"authorization|proxy[-_]?authorization|cookie|set[-_]?cookie|"
     r"access[-_]?token|refresh[-_]?token|id[-_]?token|api[-_]?key|"
     r"password|secret|token"
     r")($|[_-])"
-)
-_SECRET_RE = re.compile(
-    r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie|access_token|"
-    r"refresh_token|id[_-]?token|api[_-]?key|password|secret|token)\b(\s*[:=]\s*)"
-    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
 ALLOWED_IMAGE_TRACE_HEADERS = {
     "x-request-id",
@@ -100,6 +94,4 @@ def safe_queue_error_message(error: BaseException, failure: ImageFailure) -> str
     if not message:
         message = "图片生成失败，请稍后重试。"
     message = redact_public_urls(message)
-    message = _BEARER_RE.sub("Bearer [redacted]", message)
-    message = _SECRET_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[redacted]", message)
-    return message
+    return redact_public_secrets(message)

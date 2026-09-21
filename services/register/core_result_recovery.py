@@ -135,7 +135,7 @@ def _reconcile_core_result_unlocked(
         if not isinstance(remote_info, dict):
             raise RegisterError("verify_blocked", "注册账号验活结果格式无效。", stage="收口验活")
     except Exception as verify_error:
-        warnings.append(format_register_error(verify_error, stage="收口验活"))
+        warnings.append(format_register_error(verify_error, stage="收口验活", kind="warning"))
         remote_info = {}
 
     if str(remote_info.get("quota_warning") or "").strip():
@@ -149,22 +149,42 @@ def _reconcile_core_result_unlocked(
             if value not in (None, "")
         },
     }
-    persist_result = account_service_obj.add_account_items(
-        [normalized],
-        return_items=False,
-    )
-    if isinstance(persist_result, dict) and persist_result.get("errors"):
+    try:
+        persist_result = account_service_obj.add_account_items(
+            [normalized],
+            return_items=False,
+        )
+    except RegisterError:
+        raise
+    except Exception as persist_error:
         raise RegisterError(
             "persist_failed",
             "账号入库失败。",
-            original=str(persist_result["errors"]),
+            original=str(persist_error),
+            stage="入库",
+        ) from persist_error
+    if isinstance(persist_result, dict) and persist_result.get("errors"):
+        original = str(persist_result["errors"])
+        if "号池已满" in original or "pool_full" in original.lower():
+            raise RegisterError(
+                "pool_full",
+                "账号池已满。",
+                original=original,
+                stage="号池检查",
+            )
+        raise RegisterError(
+            "persist_failed",
+            "账号入库失败。",
+            original=original,
             stage="入库",
         )
 
     try:
         refresh_result = account_service_obj.refresh_accounts([access_token])
         if not isinstance(refresh_result, dict):
-            warnings.append(RegisterError("refresh_failed", "账号池刷新结果格式无效。", stage="刷新号池").format_log())
+            warnings.append(
+                RegisterError("refresh_failed", "账号池刷新结果格式无效。", stage="刷新号池").format_log(kind="warning")
+            )
         elif refresh_result.get("errors"):
             warnings.append(
                 RegisterError(
@@ -172,14 +192,22 @@ def _reconcile_core_result_unlocked(
                     "账号池刷新失败。",
                     original=str(refresh_result["errors"]),
                     stage="刷新号池",
-                ).format_log()
+                ).format_log(kind="warning")
             )
     except Exception as refresh_error:
-        warnings.append(format_register_error(refresh_error, stage="刷新号池"))
+        warnings.append(format_register_error(refresh_error, stage="刷新号池", kind="warning"))
 
     remove_error = openai_register.remove_pending_core_result(access_token)
     if remove_error:
-        warnings.append(f"注册核心暂存结果清理失败: {remove_error}")
+        warnings.append(
+            RegisterError(
+                "persist_failed",
+                "注册核心暂存结果清理失败，账号已入库。",
+                original=str(remove_error),
+                stage="入库",
+                label="核心结果暂存清理失败",
+            ).format_log(kind="warning")
+        )
     return {
         "result": normalized,
         "warnings": warnings,

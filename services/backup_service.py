@@ -1082,7 +1082,7 @@ class BackupService:
         if not database_url:
             return ""
         try:
-            return make_url(database_url).render_as_string(hide_password=True)
+            return make_url(database_url).render_as_string(hide_password=False)
         except Exception:
             return "invalid-database-url"
 

@@ -94,14 +94,71 @@
         </FormField>
       </div>
     </FormSection>
+
+    <FormSection title="Cloudflare 手动 Cookie">
+      <p class="text-xs leading-5 text-muted-foreground">
+        注册和生图遇到 Cloudflare 拦截时，在这里填写 Chrome146 的 cf_clearance。不要使用 FlareSolverr。
+      </p>
+      <div class="settings-check-grid settings-check-grid--single">
+        <div class="settings-check-item">
+          <div class="settings-check-control">
+            <Checkbox
+              v-model="settings.proxy_runtime.clearance.enabled"
+              :disabled="fieldReadOnly('proxy_runtime.clearance.enabled')"
+            >启用手动 Cookie</Checkbox>
+          </div>
+        </div>
+      </div>
+      <FormField label="模式">
+        <div class="w-full">
+          <GroupedSelectMenu
+            v-model="settings.proxy_runtime.clearance.mode"
+            :options="clearanceModeOptions"
+            :disabled="fieldReadOnly('proxy_runtime.clearance.mode')"
+            selected-indicator="none"
+            aria-label="Cloudflare Cookie 模式"
+            block
+          />
+        </div>
+      </FormField>
+      <FormField label="cf_clearance">
+        <Input
+          v-model.trim="settings.proxy_runtime.clearance.cf_clearance"
+          block
+          :disabled="fieldReadOnly('proxy_runtime.clearance.cf_clearance')"
+          placeholder="从 Chrome146 复制 cf_clearance"
+        />
+      </FormField>
+      <FormField label="完整 Cookie">
+        <textarea
+          v-model="settings.proxy_runtime.clearance.cf_cookies"
+          rows="3"
+          class="ui-textarea-sm font-mono w-full"
+          :disabled="fieldReadOnly('proxy_runtime.clearance.cf_cookies')"
+          placeholder="可选，完整 Cookie 头"
+        ></textarea>
+      </FormField>
+      <FormField label="User-Agent">
+        <Input
+          v-model.trim="settings.proxy_runtime.clearance.user_agent"
+          block
+          :disabled="fieldReadOnly('proxy_runtime.clearance.user_agent')"
+        />
+      </FormField>
+    </FormSection>
   </div>
 </template>
 
 <script setup lang="ts">
-import { FormField, FormSection, HelpTip, Input } from 'nanocat-ui'
+import { computed } from 'vue'
+import { Checkbox, FormField, FormSection, GroupedSelectMenu, HelpTip, Input } from 'nanocat-ui'
 import type { Settings } from '@/types/api'
 import SettingsNumberInput from '@/views/settings/SettingsNumberInput.vue'
-import { settingsFieldReadOnly, type SettingsFields } from '@/views/settings/settingsView'
+import {
+  settingsFieldOptions,
+  settingsFieldReadOnly,
+  type SettingsFields,
+} from '@/views/settings/settingsView'
 import type { NumberSettingField } from '@/views/settings/useNumberSettingField'
 
 const props = defineProps<{
@@ -120,4 +177,11 @@ const props = defineProps<{
 }>()
 
 const fieldReadOnly = (path: string) => settingsFieldReadOnly(props.fields, path)
+const clearanceModeOptions = computed(() => (
+  settingsFieldOptions(
+    props.fields,
+    'proxy_runtime.clearance.mode',
+    props.settings.proxy_runtime.clearance.mode,
+  )
+))
 </script>

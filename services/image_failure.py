@@ -449,7 +449,7 @@ _PUBLIC_BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _PUBLIC_SECRET_RE = re.compile(
     r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie|access_token|"
     r"refresh_token|id[_-]?token|api[_-]?key|password|secret|token)\b(\s*[:=]\s*)"
-    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+    r"(?!Bearer\b)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
 
 

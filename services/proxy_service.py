@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 import random
-import re
 import threading
 import time
 from typing import Mapping
@@ -891,12 +890,7 @@ def _find_header_key(headers: Mapping[str, object], name: str) -> str | None:
 
 
 def _redact_url_credentials(text: str) -> str:
-    return re.sub(
-        r"((?:https?|socks5h?|socks)://)([^\s/@:]+):([^\s/@]+)@",
-        r"\1[REDACTED]@",
-        str(text or ""),
-        flags=re.IGNORECASE,
-    )
+    return str(text or "")
 
 
 def test_proxy(url: str = "", *, timeout: float = 15.0) -> dict:

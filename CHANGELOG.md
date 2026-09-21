@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.0.3 - 2026-09-21
+
++ [修复] Microsoft 无密码登录的 `authorize/continue` 和 `passwordless/send-otp` 遇真挑战页先刷新 Cookie，再记 Cloudflare 拦截，不再被 JSON-only HTTP 前缀收成授权失败。
++ [修复] 收口验活 403 带 `cf-ray` 头不再抢成 Cloudflare；真挑战页（含无 title 的 JavaScript 拦截页）优先于 HTTP 前缀。
++ [修复] 微软无密码登录换 Token 失败阶段固定「Token 换取」，不再被状态机 `code_wait` 盖成「验证码等待」；live 路径在真正换 Token 前切到 `token_exchange`。
++ [修复] 授权/继续授权 HTTP 失败和 Token 换取失败不再被 debug 里的 `cf-ray` 头抢成 Cloudflare 拦截；真挑战页（Just a moment / `cf-chl-`）仍记成 Cloudflare。
++ [修复] 对外 Authorization 脱敏保留 `Bearer [redacted]`，不再二次替换成 `[redacted] [redacted]`；额度 0 的默认阶段统一「收口验活」；管理端 `/api/proxy/runtime` 和系统设置保留 `cf_clearance` 明文，系统设置可填 Chrome146 手动 Cookie。
++ [修复] 缺回调原文即使带 `/oauth/` 仍记成账号创建失败；继续授权 HTTP 失败阶段固定「继续授权」，不再被 `code_wait` 盖成「验证码等待」。
++ [修复] 微软邮箱不支持无密码登录记成授权失败「继续授权」；暂存 `register_stage` 和失败 payload 的 `failed_from_stage` 也改中文，不再露出 `finalize` / `account_create`。
++ [修复] 注册失败原因不再塞进带 URL / OAuth / `continue=` 的混合原文；短串 `/backend-api/me 403` 记成验活被拦；缺回调按账号创建失败；成功任务阶段也改中文。
++ [修复] 额度 0 和暂存清理失败改黄字「注册警告」四段；空 token 阶段用「Token 换取」；机器阶段 `account_create` 统一展示「创建账号资料」。
++ [修复] 授权/创建账号 HTTP 403 记成授权失败，不再糊成验活被拦；失败四段阶段用中文，不再露出英文 `failed`；发送验证码/提交注册/继续授权的 HTTP 失败也走授权失败。拿到 token 后暂存失败或邮箱回写失败都黄字警告并继续入库；入库失败和号池已满不再被改写成收口失败。管理端主日志、监控原文和数据库 URL 不再抹 token/密码，也不再截断诊断。普通聊天重试不再写 `history_and_training_disabled=False`。
 + [修复] 公开生图失败改为四段中文，管理端保留完整明文分栏。`/v1` 结果不可用原文不再带产物路径或 checksum；读产物失败、失败快照和交付失败四段同样不带内部诊断；resume-poll 缺任务走 404；任务列表单条产物失败不再拖垮整页，该项对外按失败投影。
 
 ## 1.0.2 - 2026-09-18

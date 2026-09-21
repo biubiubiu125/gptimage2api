@@ -982,7 +982,7 @@ class OpenAIBackendAPI:
             model: str,
             timezone: str,
             thinking_effort: str = "",
-            history_and_training_disabled: bool = True,
+            history_and_training_disabled: Optional[bool] = True,
     ) -> Dict[str, Any]:
         """把标准 messages 构造成 web 对话请求体。"""
         payload = {
@@ -996,7 +996,6 @@ class OpenAIBackendAPI:
             "force_paragen_model_slug": "",
             "force_rate_limit": False,
             "force_use_sse": True,
-            "history_and_training_disabled": bool(history_and_training_disabled),
             "reset_rate_limits": False,
             "suggestions": [],
             "supported_encodings": [],
@@ -1007,6 +1006,8 @@ class OpenAIBackendAPI:
             "websocket_request_id": new_uuid(),
             "client_contextual_info": chrome146_client_contextual_info(),
         }
+        if history_and_training_disabled is not None:
+            payload["history_and_training_disabled"] = bool(history_and_training_disabled)
         normalized_effort = normalize_thinking_effort(thinking_effort)
         if normalized_effort:
             payload["thinking_effort"] = normalized_effort
@@ -4014,9 +4015,9 @@ class OpenAIBackendAPI:
             messages or [{"role": "user", "content": prompt}],
             self._image_model_slug(model),
             timezone,
-            history_and_training_disabled=False,
+            history_and_training_disabled=None,
         )
-        payload["history_and_training_disabled"] = False
+        payload.pop("history_and_training_disabled", None)
         payload["system_hints"] = []
         if references:
             message = payload["messages"][0] if payload.get("messages") else None

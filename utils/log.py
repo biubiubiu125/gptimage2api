@@ -68,10 +68,8 @@ class Logger:
         if isinstance(value, dict):
             sanitized = {}
             for key, item in value.items():
-                lowered_key = key.lower()
-                if isinstance(item, str) and ("token" in lowered_key or lowered_key == "dx"):
-                    sanitized[key] = "[redacted]"
-                elif isinstance(item, str) and ("base64" in lowered_key or lowered_key == "b64_json"):
+                lowered_key = str(key).lower()
+                if isinstance(item, str) and ("base64" in lowered_key or lowered_key == "b64_json"):
                     sanitized[key] = self._mask_base64(item)
                 else:
                     sanitized[key] = self._sanitize(item)

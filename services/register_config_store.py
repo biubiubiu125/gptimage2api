@@ -643,15 +643,4 @@ def create_register_config_store(path: Path):
 
 
 def _mask_password(url: str) -> str:
-    if "://" not in url:
-        return url
-    try:
-        protocol, rest = url.split("://", 1)
-        if "@" in rest:
-            credentials, host = rest.split("@", 1)
-            if ":" in credentials:
-                username, _ = credentials.split(":", 1)
-                return f"{protocol}://{username}:****@{host}"
-        return url
-    except Exception:
-        return url
+    return str(url or "")

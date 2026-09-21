@@ -52,6 +52,10 @@ const settingsOptionLabels: Record<string, Record<string, string>> = {
     webdav: '仅 WebDAV',
     both: '本地 + WebDAV',
   },
+  'proxy_runtime.clearance.mode': {
+    none: '关闭',
+    manual: '手动 Cookie',
+  },
   'backup.include': {
     image_tasks: '图片任务记录',
     editable_files: 'PPT / PSD 文件',

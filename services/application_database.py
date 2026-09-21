@@ -95,7 +95,7 @@ def is_postgresql_url(database_url: str) -> bool:
 
 def display_database_url(database_url: str) -> str:
     try:
-        return make_url(database_url).render_as_string(hide_password=True)
+        return make_url(database_url).render_as_string(hide_password=False)
     except Exception:
         return "invalid-database-url"
 

@@ -657,7 +657,7 @@ def create_router(app_version: str) -> APIRouter:
     async def get_proxy_runtime_endpoint(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {
-            "runtime": config.get_public_proxy_runtime_settings(),
+            "runtime": config.get_proxy_runtime_settings(),
             "status": proxy_settings.get_runtime_status(),
         }
 

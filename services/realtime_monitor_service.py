@@ -53,7 +53,10 @@ CALL_FAILURE_FIELDS = (
 )
 
 
-def _trim_raw(value: object, limit: int = 4000) -> str:
+def _trim_raw(value: object, limit: int | None = None) -> str:
+    text = str(value or "").strip()
+    if limit is None or len(text) <= limit:
+        return text
     return _trim(value, limit)
 
 
@@ -988,7 +991,7 @@ class RealtimeMonitorService:
                 *RAW_DIAGNOSTIC_FIELDS,
             ):
                 if key in data:
-                    payload[key] = _trim_raw(data[key], 1000) if key in RAW_DIAGNOSTIC_FIELDS else data[key]
+                    payload[key] = _trim_raw(data[key]) if key in RAW_DIAGNOSTIC_FIELDS else data[key]
         return payload
 
 
