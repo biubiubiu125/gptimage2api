@@ -269,6 +269,16 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
     return thread
 
 
+def web_asset_cache_headers(asset: Path) -> dict[str, str]:
+    name = asset.name.lower()
+    suffix = asset.suffix.lower()
+    if name == "index.html" or suffix == ".html":
+        return {"Cache-Control": "no-store"}
+    if asset.parent.name == "assets":
+        return {"Cache-Control": "public, max-age=31536000, immutable"}
+    return {"Cache-Control": "no-cache"}
+
+
 def resolve_web_asset(requested_path: str) -> Path | None:
     base_dir = next(
         (

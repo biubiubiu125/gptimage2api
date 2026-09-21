@@ -343,6 +343,7 @@ class UpdateService:
         self._lock = threading.RLock()
         self._task: UpdateTaskView | None = None
         self._loaded = False
+        self._loaded_succeeded = False
         self._worker_active = False
         self._restart_scheduled = False
 
@@ -376,6 +377,7 @@ class UpdateService:
             self._task = UpdateTaskView.model_validate(payload) if payload else None
         except Exception:
             self._task = None
+        self._loaded_succeeded = self._task is not None and self._task.state == "succeeded"
         if self._task is None:
             self._task = self._idle_view(current_version)
 
@@ -464,12 +466,29 @@ class UpdateService:
             current_tag=current_tag,
         )
 
+    def _discard_succeeded_locked(self, current_version: str) -> UpdateTaskView:
+        idle = self._idle_view(current_version)
+        self._task = idle
+        self._loaded_succeeded = False
+        try:
+            self._state_path.unlink(missing_ok=True)
+        except OSError:
+            self._persist_locked()
+        return idle
+
     def view(self, current_version: str) -> UpdateTaskView:
         with self._lock:
             self._load_locked(current_version)
+            if self._loaded_succeeded:
+                self._loaded_succeeded = False
+                return self._discard_succeeded_locked(current_version)
             self._reconcile_locked(current_version)
             if self._task is None:
                 raise RuntimeError("update task is not initialized")
+            if self._task.state == "succeeded":
+                snapshot = self._task
+                self._discard_succeeded_locked(current_version)
+                return snapshot
             return self._task
 
     def start(self, current_version: str) -> UpdateTaskView:
@@ -480,6 +499,7 @@ class UpdateService:
             self._reconcile_locked(current_version)
             if self._task is not None and self._task.busy:
                 return self._task
+            self._loaded_succeeded = False
             _, current_tag = _version_parts(current_version)
             task_id = uuid.uuid4().hex
             queued = UpdateTaskEventView(

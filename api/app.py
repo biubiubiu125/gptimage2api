@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from api import accounts, ai, image_tasks, prompts, register, system
 from api.errors import install_exception_handlers
-from api.support import resolve_web_asset, start_account_lifecycle_watcher
+from api.support import resolve_web_asset, start_account_lifecycle_watcher, web_asset_cache_headers
 from services.account_service import account_service
 from services.backup_service import backup_service
 from services.config import config
@@ -455,6 +455,6 @@ def create_app() -> FastAPI:
         asset = resolve_web_asset(full_path)
         if asset is None:
             raise HTTPException(status_code=404, detail="找不到该页面。")
-        return FileResponse(asset)
+        return FileResponse(asset, headers=web_asset_cache_headers(asset))
 
     return app

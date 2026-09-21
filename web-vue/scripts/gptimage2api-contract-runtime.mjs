@@ -61,6 +61,10 @@ assert(appShell.includes('GPTImage2API'), 'shell must use GPTImage2API branding'
 assert(appShell.includes("label: '注册账号'"), 'sidebar must label register as 注册账号')
 assert(!appShell.includes("label: '注册机'"), 'sidebar must not keep 注册机 label')
 assert(appShell.includes("register: '注册账号'"), 'page title map must use 注册账号')
+assert(appShell.includes('shouldReloadForSucceededUpdate'), 'console must gate update auto-reload')
+assert(appShell.includes('updateReloadedTaskId'), 'console must remember the update task it already reloaded')
+const updateReload = read('src/lib/updateReload.ts')
+assert(updateReload.includes('taskId !== activeTaskId'), 'update auto-reload must ignore tasks this browser did not start')
 
 const providerView = read('src/views/register/registerProviderView.ts')
 const providerValues = [...providerView.matchAll(/value: '([^']+)'/g)].map(match => match[1])

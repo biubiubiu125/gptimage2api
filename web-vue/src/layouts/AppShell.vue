@@ -706,6 +706,7 @@ import {
   splitReleaseInlineCode,
   type ReleaseInfo,
 } from '@/lib/release'
+import { shouldReloadForSucceededUpdate } from '@/lib/updateReload'
 import type { UpdateTaskResponse, VersionCheckResponse } from '@/types/api'
 import localVersion from '../../../VERSION?raw'
 
@@ -1283,14 +1284,21 @@ async function pollUpdateTask() {
     }
     clearUpdateTaskPollTimer()
     await checkForUpdates(false)
-    const targetTag = normalizeVersionTag(task.latest_tag)
+    const reloadedTaskId = getStringPreference(preferenceKeys.updateReloadedTaskId)
     if (
       !updateReloadScheduled
-      && task.state === 'succeeded'
-      && targetTag
-      && normalizeVersionTag(localVersion) !== targetTag
+      && shouldReloadForSucceededUpdate({
+        state: task.state,
+        taskId: task.task_id,
+        latestTag: task.latest_tag,
+        localVersion,
+        activeTaskId,
+        reloadedTaskId,
+      })
     ) {
       updateReloadScheduled = true
+      setStringPreference(preferenceKeys.updateReloadedTaskId, task.task_id)
+      removePreference(preferenceKeys.updateActiveTaskId)
       window.setTimeout(() => window.location.reload(), 400)
     }
   } catch {

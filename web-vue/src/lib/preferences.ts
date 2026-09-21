@@ -22,6 +22,7 @@ export const preferenceKeys = {
   themeMode: 'theme-mode',
   updateActiveTaskId: 'update-active-task-id',
   updateDismissedTag: 'update-dismissed-tag',
+  updateReloadedTaskId: 'update-reloaded-task-id',
 } as const
 
 type PreferenceKey = typeof preferenceKeys[keyof typeof preferenceKeys]

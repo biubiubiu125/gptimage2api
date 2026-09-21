@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.0.4 - 2026-09-21
+
++ [修复] 登录管理端后不再因磁盘上残留的成功更新任务整页死循环刷新。成功态只展示一次就清掉，前端只为当前浏览器自己发起且尚未刷新过的任务自动 reload；`index.html` 不再被缓存。
+
 ## 1.0.3 - 2026-09-21
 
 + [修复] Microsoft 无密码登录的 `authorize/continue` 和 `passwordless/send-otp` 遇真挑战页先刷新 Cookie，再记 Cloudflare 拦截，不再被 JSON-only HTTP 前缀收成授权失败。
