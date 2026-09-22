@@ -145,6 +145,7 @@ IMAGE_ATTEMPT_KEYS = {
     "slot",
     "attempt",
     "account_email",
+    "account_id",
     "status",
     "failure_code",
     "failure_scope",
@@ -307,6 +308,45 @@ def collect_image_attempts(value: object) -> list[dict[str, object]]:
         elif isinstance(item, (list, tuple)):
             pending.extend(reversed(item))
     return attempts
+
+
+def merge_image_attempt_records(
+    existing_payload: object,
+    incoming: object,
+    *,
+    slot: int,
+) -> list[dict[str, object]]:
+    existing = collect_image_attempts(existing_payload)
+    incoming_attempts = collect_image_attempts(incoming)
+    try:
+        slot_value = max(1, int(slot or 1))
+    except (TypeError, ValueError):
+        slot_value = 1
+    next_attempt = 1 + sum(
+        1
+        for item in existing
+        if max(1, int(item.get("slot") or 1)) == slot_value
+    )
+    merged = [dict(item) for item in existing]
+    last_email = str((merged[-1].get("account_email") if merged else "") or "").strip()
+    last_account_id = str((merged[-1].get("account_id") if merged else "") or "").strip()
+    for item in incoming_attempts:
+        rewritten = dict(item)
+        rewritten["slot"] = slot_value
+        rewritten["attempt"] = next_attempt
+        email = str(rewritten.get("account_email") or "").strip()
+        account_id = str(rewritten.get("account_id") or "").strip()
+        rewritten["switched_account"] = bool(
+            (last_email and email and last_email.casefold() != email.casefold())
+            or (last_account_id and account_id and last_account_id != account_id)
+        )
+        merged.append(rewritten)
+        if email:
+            last_email = email
+        if account_id:
+            last_account_id = account_id
+        next_attempt += 1
+    return merged
 
 
 IMAGE_TRACE_REQUEST_KEYS = {

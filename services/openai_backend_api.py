@@ -448,6 +448,7 @@ class OpenAIBackendAPI:
                 upstream=True,
             ))
         self._apply_account_session_cookies()
+        proxy_settings.merge_session_cookie_header(self.session)
 
     def close(self) -> None:
         if getattr(self, "_closed", False):

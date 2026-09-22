@@ -23,6 +23,7 @@ from services.image_failure import (
     TASK_STATE_CONFLICT_PUBLIC_MESSAGE,
     image_failure,
     public_http_chinese_error,
+    should_switch_generating_account,
     should_switch_image_account,
 )
 from services.image_queue.database import ImageQueueDatabase, ImageQueueUnavailableError
@@ -78,6 +79,20 @@ WORKER_IDENTITY_SNAPSHOT_KEYS = (
 )
 
 MAX_QUOTA_ACCOUNTING_ATTEMPTS = 5
+
+_DOWNLOAD_OR_SAVE_STAGES = {
+    JobStage.RESOLVING.value,
+    JobStage.DOWNLOADING.value,
+    JobStage.TRANSFORMING.value,
+    JobStage.SAVING.value,
+}
+
+
+def should_switch_claimed_account(stage: object, error_code: object) -> bool:
+    stage_value = str(getattr(stage, "value", stage) or "").strip().lower()
+    if stage_value in _DOWNLOAD_OR_SAVE_STAGES:
+        return should_switch_image_account(error_code)
+    return should_switch_generating_account(error_code)
 
 
 class IdempotencyConflict(ValueError):
@@ -1888,7 +1903,7 @@ class ImageQueueRepository:
                 elif (
                     has_remote_checkpoint
                     and job.account_id is not None
-                    and not should_switch_image_account(job.error_code)
+                    and not should_switch_claimed_account(job.stage, job.error_code)
                 ):
                     restricted_candidates = True
                     candidates = [candidate for candidate in candidates if candidate.account_id == job.account_id]
@@ -1928,7 +1943,7 @@ class ImageQueueRepository:
                         session.commit()
                         continue
                 elif (
-                    should_switch_image_account(job.error_code)
+                    should_switch_claimed_account(job.stage, job.error_code)
                     and job.account_id is not None
                     and len(candidates) > 1
                 ):
@@ -2542,6 +2557,54 @@ class ImageQueueRepository:
             )
             return True
 
+    @staticmethod
+    def _payload_preserving_image_attempts(payload: object) -> dict[str, Any]:
+        from services.log_service import collect_image_attempts
+
+        attempts = collect_image_attempts(payload)
+        return {"_image_attempts": list(attempts)} if attempts else {}
+
+    def append_image_attempts(
+        self,
+        claim: ClaimedJob,
+        attempts: Sequence[dict[str, Any]] | None,
+    ) -> bool:
+        incoming = [dict(item) for item in attempts or [] if isinstance(item, dict)]
+        if not incoming:
+            return False
+        with self.database.session() as session:
+            job, _task = self._claimed_job_and_task(session, claim)
+            if job is None:
+                return False
+            from services.log_service import merge_image_attempt_records
+
+            payload = dict(job.result_payload or {})
+            merged = merge_image_attempt_records(
+                payload,
+                incoming,
+                slot=int(job.ordinal or 1),
+            )
+            payload["_image_attempts"] = merged
+            job.result_payload = payload
+            job.updated_at = utc_now()
+            latest = merged[-1] if merged else {}
+            self._event(
+                session,
+                task_id=job.task_id,
+                job_id=job.id,
+                event_type="image_account_attempt",
+                attempt=int(latest.get("attempt") or job.generate_attempts or 0),
+                data={
+                    "slot": int(latest.get("slot") or job.ordinal or 1),
+                    "attempt": int(latest.get("attempt") or 0),
+                    "status": str(latest.get("status") or ""),
+                    "account_email": str(latest.get("account_email") or ""),
+                    "failure_code": str(latest.get("failure_code") or ""),
+                    "switched_account": bool(latest.get("switched_account") or False),
+                },
+            )
+            return True
+
     def complete_job(
         self,
         claim: ClaimedJob,
@@ -2605,12 +2668,22 @@ class ImageQueueRepository:
             job.quota_consumed = True
             job.status = JobStatus.SUCCESS.value
             job.stage = JobStage.SUCCESS.value
+            from services.log_service import merge_image_attempt_records
+
+            incoming_payload = dict(result_payload or {})
+            merged = merge_image_attempt_records(
+                job.result_payload,
+                incoming_payload,
+                slot=int(job.ordinal or 1),
+            )
+            incoming_payload.pop("_image_attempts", None)
             job.result_payload = {
-                **dict(result_payload),
-                "url": str(result_payload.get("url") or artifact.public_url or ""),
+                **incoming_payload,
+                "url": str(incoming_payload.get("url") or artifact.public_url or ""),
                 "width": artifact.width,
                 "height": artifact.height,
                 "relative_path": artifact.relative_path,
+                **({"_image_attempts": merged} if merged else {}),
             }
             job.error_code = None
             job.error_message = None
@@ -2702,7 +2775,7 @@ class ImageQueueRepository:
                 )
             job.status = JobStatus.QUEUED.value
             job.stage = recovery_stage.value
-            job.result_payload = {}
+            job.result_payload = self._payload_preserving_image_attempts(job.result_payload)
             job.error_code = None
             job.error_message = None
             job.available_at = utc_now()
@@ -2785,7 +2858,7 @@ class ImageQueueRepository:
             self._touch_stage_timing(job, previous_stage, JobStage.FAILED.value, failed_at)
             job.status = JobStatus.FAILED.value
             job.stage = JobStage.FAILED.value
-            job.result_payload = {}
+            job.result_payload = self._payload_preserving_image_attempts(job.result_payload)
             job.error_code = error_code
             job.error_message = error_message
             job.available_at = failed_at
@@ -2876,7 +2949,7 @@ class ImageQueueRepository:
                 return None
             job = session.get(ImageJob, artifact.job_id) if artifact.job_id is not None else None
             if job is not None:
-                job.result_payload = {}
+                job.result_payload = self._payload_preserving_image_attempts(job.result_payload)
                 job.updated_at = utc_now()
             artifact.status = ArtifactStatus.INVALID.value
             artifact.ready_at = None
@@ -2932,7 +3005,7 @@ class ImageQueueRepository:
             job.next_retry_at = next_retry_at
             job.available_at = next_retry_at
             job.updated_at = utc_now()
-            if should_switch_image_account(error_code):
+            if should_switch_claimed_account(job.stage, error_code):
                 job.conversation_id = None
                 job.file_ids = []
                 job.sediment_ids = []
@@ -3466,7 +3539,7 @@ class ImageQueueRepository:
             if job_id is not None:
                 job = session.get(ImageJob, job_id)
                 if job is not None:
-                    job.result_payload = {}
+                    job.result_payload = self._payload_preserving_image_attempts(job.result_payload)
                     job.updated_at = utc_now()
             session.delete(artifact)
             self._event(

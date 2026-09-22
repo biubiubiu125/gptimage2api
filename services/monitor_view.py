@@ -387,10 +387,32 @@ def _build_egress(record: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _queue_attempt_rows(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    rows: list[Mapping[str, Any]] = []
+    raw_attempts = record.get("image_attempts")
+    if isinstance(raw_attempts, list):
+        rows.extend(item for item in raw_attempts if isinstance(item, Mapping))
+    captured = record.get("_image_attempts")
+    if isinstance(captured, Mapping):
+        rows.extend(item for item in captured.values() if isinstance(item, Mapping))
+    return rows
+
+
 def _build_account_attempt(record: Mapping[str, Any]) -> dict[str, Any]:
-    attempt = _int(record.get("image_account_attempt"))
-    max_attempts = max(attempt, _int(record.get("image_account_max_attempts")))
-    switch_count = _int(record.get("image_account_switch_count"))
+    rows = _queue_attempt_rows(record)
+    queue_attempt = max(_int(record.get("attempt_count")), len(rows))
+    queue_switch = max(
+        _int(record.get("switch_count")),
+        sum(1 for item in rows if item.get("switched_account") is True),
+    )
+    protocol_attempt = _int(record.get("image_account_attempt"))
+    attempt = max(protocol_attempt, queue_attempt)
+    max_attempts = max(
+        attempt,
+        _int(record.get("image_account_max_attempts")),
+        queue_attempt,
+    )
+    switch_count = max(_int(record.get("image_account_switch_count")), queue_switch)
     images = _mapping(record.get("images"))
     image_count = max((_int(_mapping(item).get("total")) for item in images.values()), default=0)
     parts: list[str] = []
@@ -586,6 +608,10 @@ def _project_record(value: object, *, include_detail: bool = False) -> dict[str,
         stage_text = "运行中" if _text(record.get("status")).lower() == "running" else status_label
     result["egress"] = egress
     result["account_attempt"] = account_attempt
+    if account_attempt["attempt"] or account_attempt["max_attempts"] or account_attempt["switch_count"]:
+        result["image_account_attempt"] = account_attempt["attempt"]
+        result["image_account_max_attempts"] = account_attempt["max_attempts"]
+        result["image_account_switch_count"] = account_attempt["switch_count"]
     result["presentation"] = {
         "status_label": status_label,
         "status_tone": status_tone,

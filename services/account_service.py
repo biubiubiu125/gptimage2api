@@ -2395,14 +2395,21 @@ class AccountService:
         if not management_id:
             return None
         self._refresh_accounts_snapshot_if_stale()
+
+        def present(account: dict) -> dict:
+            result = dict(account)
+            access_token = str(result.get("access_token") or "").strip()
+            result["image_inflight"] = int(self._image_inflight.get(access_token, 0))
+            return result
+
         with self._lock:
             for account in self._accounts.values():
                 if str(account.get("management_id") or "").strip().lower() == management_id:
-                    result = dict(account)
-                    access_token = str(result.get("access_token") or "").strip()
-                    result["image_inflight"] = int(self._image_inflight.get(access_token, 0))
-                    return result
-        return None
+                    return present(account)
+            resolved = self._resolve_image_account_locked(management_id)
+            if resolved is None:
+                return None
+            return present(resolved[1])
 
     def resolve_account_ids(self, account_ids: list[str]) -> tuple[list[str], list[str]]:
         requested = list(dict.fromkeys(str(item or "").strip().lower() for item in account_ids if str(item or "").strip()))

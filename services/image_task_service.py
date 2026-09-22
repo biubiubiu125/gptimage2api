@@ -23,7 +23,9 @@ from services.image_delivery import (
 from services.image_failure import (
     IMAGE_TASK_NOT_FOUND_PUBLIC_MESSAGE,
     IMAGE_TASK_PENDING_PUBLIC_MESSAGE,
+    classify_image_exception,
     image_failure,
+    public_image_error_message,
 )
 from services.image_task_view import canonical_image_task_status
 from services.image_url import build_console_image_url, build_public_image_url
@@ -128,6 +130,7 @@ def _public_result_item(value: object) -> dict[str, Any]:
         "source_url",
         "sourceUrl",
         "_account_email",
+        "_image_attempts",
         "worker_id",
         "image_base_url",
     ):
@@ -334,6 +337,7 @@ class ImageTaskService:
                 account_email = _clean(item.get("_account_email"))
                 if account_email:
                     break
+        image_attempts: list[dict[str, Any]] = []
         detail: dict[str, Any] = {
             "call_id": call_id,
             "endpoint": _clean(request_payload.get("source_endpoint")) or (
@@ -370,6 +374,51 @@ class ImageTaskService:
             detail["conversation_id"] = task.conversation_id
         if error_code or task.error_message:
             detail.update(_call_record_error_fields(error_code, task.error_message))
+        try:
+            from services.log_service import collect_image_attempts
+
+            repository = getattr(self, "repository", None)
+            list_jobs = getattr(repository, "list_jobs", None) if repository is not None else None
+            if callable(list_jobs):
+                try:
+                    for job in list_jobs(task.id) or []:
+                        image_attempts.extend(
+                            collect_image_attempts(getattr(job, "result_payload", None))
+                        )
+                except Exception as exc:
+                    logger.warning({
+                        "event": "image_task_call_record_attempts_lookup_failed",
+                        "task_id": str(task.id),
+                        "error": str(exc),
+                    })
+            if not image_attempts:
+                image_attempts.extend(collect_image_attempts(list(task.data or [])))
+            image_attempts.sort(
+                key=lambda item: (
+                    int(item.get("slot") or 1),
+                    int(item.get("attempt") or 1),
+                )
+            )
+            attempt_email = next(
+                (
+                    _clean(item.get("account_email"))
+                    for item in reversed(image_attempts)
+                    if _clean(item.get("account_email"))
+                ),
+                "",
+            )
+            if attempt_email:
+                account_email = attempt_email
+                detail["account_email"] = account_email
+            if image_attempts:
+                detail["image_attempts"] = image_attempts
+        except Exception as exc:
+            logger.warning({
+                "event": "image_task_call_record_attempts_finalize_failed",
+                "task_id": str(task.id),
+                "call_id": call_id,
+                "error": str(exc),
+            })
         try:
             from services.realtime_monitor_service import realtime_monitor_service
 
@@ -2166,6 +2215,95 @@ class ImageTaskService:
             return True
         return False
 
+    def _claim_success_image_attempts(
+        self,
+        outputs: Sequence[object] | None,
+        *,
+        account_email: str,
+        conversation_id: str,
+        account_id: str = "",
+    ) -> list[dict[str, Any]]:
+        from services.log_service import collect_image_attempts
+
+        collected: list[dict[str, Any]] = []
+        for output in outputs or []:
+            collected.extend(collect_image_attempts(getattr(output, "image_attempts", None)))
+        email = _clean(account_email)
+        conversation = _clean(conversation_id)
+        account_key = _clean(account_id)
+        for item in collected:
+            if email and not _clean(item.get("account_email")):
+                item["account_email"] = email
+            if conversation and not _clean(item.get("conversation_id")):
+                item["conversation_id"] = conversation
+            if account_key and not _clean(item.get("account_id")):
+                item["account_id"] = account_key
+        if collected:
+            return collected
+        return [{
+            "slot": 1,
+            "attempt": 1,
+            "status": "success",
+            "account_email": email,
+            "account_id": account_key,
+            "conversation_id": conversation,
+        }]
+
+    def _claim_failure_image_attempts(
+        self,
+        error: BaseException,
+        *,
+        account_email: str,
+        account_id: str = "",
+    ) -> list[dict[str, Any]]:
+        from services.log_service import collect_image_attempts
+
+        email = _clean(account_email) or _clean(getattr(error, "account_email", ""))
+        account_key = _clean(account_id) or _clean(getattr(error, "account_id", ""))
+        collected = collect_image_attempts(error)
+        for item in collected:
+            if email and not _clean(item.get("account_email")):
+                item["account_email"] = email
+            if account_key and not _clean(item.get("account_id")):
+                item["account_id"] = account_key
+        if collected:
+            return collected
+        failure = classify_image_exception(error)
+        attempt: dict[str, Any] = {
+            "slot": 1,
+            "attempt": 1,
+            "status": "text_review" if failure.outcome == "text" else "failed",
+            "account_email": email,
+            "account_id": account_key,
+            "conversation_id": _clean(getattr(error, "conversation_id", "")),
+            "public_error": public_image_error_message(failure),
+            **failure.diagnostic_fields(),
+        }
+        raw_error = _clean(getattr(error, "raw_error", "") or str(error))
+        if raw_error:
+            attempt["raw_error"] = raw_error
+        return [attempt]
+
+    def _persist_claim_image_attempts(
+        self,
+        claim: ClaimedJob,
+        attempts: Sequence[Mapping[str, object]] | None,
+    ) -> bool:
+        repository = getattr(self, "repository", None)
+        append = getattr(repository, "append_image_attempts", None) if repository is not None else None
+        if not callable(append) or not attempts:
+            return False
+        try:
+            return bool(append(claim, [dict(item) for item in attempts]))
+        except Exception as exc:
+            logger.warning({
+                "event": "image_claim_attempts_persist_failed",
+                "task_id": str(claim.job.task_id),
+                "job_id": str(claim.job.id),
+                "error": str(exc),
+            })
+            return False
+
     def execute_claim(
         self,
         claim: ClaimedJob,
@@ -2180,6 +2318,7 @@ class ImageTaskService:
             raise ValueError("认领的图片任务已不存在。")
         payload = dict(context["request_payload"])
         account_email = ""
+        account_id = _clean(str(getattr(claim, "account_id", "") or ""))
         try:
             from services.account_service import account_service
 
@@ -2656,6 +2795,15 @@ class ImageTaskService:
                 if output_conversation_id:
                     conversation_id = output_conversation_id
             ensure_active()
+            success_attempts = self._claim_success_image_attempts(
+                outputs,
+                account_email=account_email,
+                conversation_id=conversation_id,
+                account_id=account_id,
+            )
+            persisted = self._persist_claim_image_attempts(claim, success_attempts)
+            if success_attempts and not persisted:
+                result_payload["_image_attempts"] = success_attempts
             completed = repository.complete_job(claim, final_artifact, result_payload)
             if completed is None:
                 raise RuntimeError("提交结果前图片任务租约已丢失。")
@@ -2664,6 +2812,14 @@ class ImageTaskService:
 
         except Exception as exc:
             track_error_conversations(exc)
+            self._persist_claim_image_attempts(
+                claim,
+                self._claim_failure_image_attempts(
+                    exc,
+                    account_email=account_email,
+                    account_id=account_id,
+                ),
+            )
             self._discard_artifacts_safely(
                 uncommitted_artifacts,
                 reason="image_claim_uncommitted_artifacts",

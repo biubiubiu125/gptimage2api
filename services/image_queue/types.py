@@ -53,7 +53,7 @@ class ArtifactStatus(StrEnum):
 
 
 class LocalArtifactRecoveryUnavailable(RuntimeError):
-    pass
+    code = "local_artifact_unavailable"
 
 
 class DeliveryStatus(StrEnum):

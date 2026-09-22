@@ -353,14 +353,15 @@ def _normalize_proxy_runtime_settings(value: object) -> dict[str, object]:
     default_clearance = DEFAULT_PROXY_RUNTIME["clearance"]
     clearance_source = source.get("clearance") if isinstance(source.get("clearance"), dict) else {}
 
-    clearance_mode = str(clearance_source.get("mode") or default_clearance["mode"]).strip().lower()
-    if clearance_mode == "flaresolverr":
+    clearance_enabled = _normalize_bool(
+        clearance_source.get("enabled"),
+        bool(default_clearance["enabled"]),
+    )
+    if str(clearance_source.get("mode") or "").strip().lower() == "flaresolverr":
         # FlareSolverr cookies are bound to its own Chromium TLS, not
         # curl_cffi chrome146. Keep Chrome146 sessions on manual cookies.
-        clearance_mode = "none"
         clearance_source = dict(clearance_source)
-    if clearance_mode not in {"none", "manual"}:
-        clearance_mode = str(default_clearance["mode"])
+    clearance_mode = "manual" if clearance_enabled else "none"
 
     user_agent = DEFAULT_PROXY_RUNTIME_USER_AGENT
     browser = "chrome146"
@@ -378,7 +379,7 @@ def _normalize_proxy_runtime_settings(value: object) -> dict[str, object]:
     normalized_clearance.pop("has_cf_cookies", None)
     normalized_clearance.pop("has_cf_clearance", None)
     normalized_clearance.update({
-        "enabled": _normalize_bool(clearance_source.get("enabled"), bool(default_clearance["enabled"])),
+        "enabled": clearance_enabled,
         "mode": clearance_mode,
         "cf_cookies": cf_cookies,
         "cf_clearance": cf_clearance,

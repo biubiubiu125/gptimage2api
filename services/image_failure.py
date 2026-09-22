@@ -282,8 +282,20 @@ def looks_like_conversation_mode_blocked(value: Any) -> bool:
     )
 
 
+GENERATING_ACCOUNT_SWITCH_EXCLUDED_CODES = frozenset({
+    "content_policy_violation",
+    "invalid_image_input",
+    "upstream_text_reply",
+    "unsupported_model",
+    "task_interrupted",
+    "image_task_cancelled",
+    "internal_error",
+    "durable_context_required",
+})
+
+
 def should_switch_image_account(error_code: object) -> bool:
-    """Return True when a failed job should retry on a different upstream account."""
+    """Return True when a failed download/save job should retry on a different account."""
 
     code = str(error_code or "").strip().lower()
     code = FAILURE_CODE_ALIASES.get(code, code)
@@ -291,6 +303,17 @@ def should_switch_image_account(error_code: object) -> bool:
     if policy is None:
         return False
     return bool(policy.verify_account) and int(policy.status_code) != 400
+
+
+def should_switch_generating_account(error_code: object) -> bool:
+    """Return True when a generating-stage failure should immediately switch accounts."""
+
+    code = str(error_code or "").strip().lower()
+    code = FAILURE_CODE_ALIASES.get(code, code)
+    policy = FAILURE_POLICIES.get(code)
+    if policy is None or code in GENERATING_ACCOUNT_SWITCH_EXCLUDED_CODES:
+        return False
+    return int(policy.status_code) != 400
 
 
 def image_failure(
@@ -962,6 +985,8 @@ def classify_image_exception(exc: BaseException, *, code: str | None = None) -> 
         return remember(image_failure(structured_code, raw_detail=str(exc)))
     if code:
         return remember(image_failure(code, raw_detail=str(exc)))
+    if type(exc).__name__ == "ClaimMaxRuntimeExceeded":
+        return remember(image_failure("image_claim_timeout", raw_detail=str(exc)))
     if isinstance(exc, (TimeoutError, curl_exceptions.Timeout)):
         return remember(image_failure("upstream_connection_timeout", raw_detail=str(exc)))
     if isinstance(

@@ -687,15 +687,12 @@ def _build_detail_presentation(
         _clean(attempt.get("result_status")) == "generated_but_delivery_failed"
         for attempt in attempts
     )
-    has_attempt_breakdown = (
-        bool(attempts)
-        and (
-            len(attempts) > 1
-            or requested_count > 1
-            or has_delivery_failure
-        )
+    has_attempt_breakdown = bool(attempts) or requested_count > 1 or has_delivery_failure
+    identity_lives_in_attempts = bool(attempts) and (
+        len(attempts) > 1
+        or requested_count > 1
+        or any(_clean(attempt.get("account_email")) for attempt in attempts)
     )
-    identity_lives_in_attempts = len(attempts) > 1 or requested_count > 1
     core = build_request_detail_core(
         summary,
         detail,

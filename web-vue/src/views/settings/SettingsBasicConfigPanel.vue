@@ -103,24 +103,14 @@
         <div class="settings-check-item">
           <div class="settings-check-control">
             <Checkbox
-              v-model="settings.proxy_runtime.clearance.enabled"
+              :model-value="settings.proxy_runtime.clearance.enabled"
               :disabled="fieldReadOnly('proxy_runtime.clearance.enabled')"
+              @update:model-value="onClearanceEnabledChange"
             >启用手动 Cookie</Checkbox>
+            <HelpTip text="保存设置后，ChatGPT 请求会带上已填写的 cf_clearance。外发身份固定为 Chrome146。" />
           </div>
         </div>
       </div>
-      <FormField label="模式">
-        <div class="w-full">
-          <GroupedSelectMenu
-            v-model="settings.proxy_runtime.clearance.mode"
-            :options="clearanceModeOptions"
-            :disabled="fieldReadOnly('proxy_runtime.clearance.mode')"
-            selected-indicator="none"
-            aria-label="Cloudflare Cookie 模式"
-            block
-          />
-        </div>
-      </FormField>
       <FormField label="cf_clearance">
         <Input
           v-model.trim="settings.proxy_runtime.clearance.cf_clearance"
@@ -142,7 +132,7 @@
         <Input
           v-model.trim="settings.proxy_runtime.clearance.user_agent"
           block
-          :disabled="fieldReadOnly('proxy_runtime.clearance.user_agent')"
+          disabled
         />
       </FormField>
     </FormSection>
@@ -150,12 +140,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-import { Checkbox, FormField, FormSection, GroupedSelectMenu, HelpTip, Input } from 'nanocat-ui'
+import { Checkbox, FormField, FormSection, HelpTip, Input } from 'nanocat-ui'
 import type { Settings } from '@/types/api'
 import SettingsNumberInput from '@/views/settings/SettingsNumberInput.vue'
 import {
-  settingsFieldOptions,
   settingsFieldReadOnly,
   type SettingsFields,
 } from '@/views/settings/settingsView'
@@ -177,11 +165,10 @@ const props = defineProps<{
 }>()
 
 const fieldReadOnly = (path: string) => settingsFieldReadOnly(props.fields, path)
-const clearanceModeOptions = computed(() => (
-  settingsFieldOptions(
-    props.fields,
-    'proxy_runtime.clearance.mode',
-    props.settings.proxy_runtime.clearance.mode,
-  )
-))
+
+const onClearanceEnabledChange = (value: boolean | 'indeterminate') => {
+  const enabled = value === true
+  props.settings.proxy_runtime.clearance.enabled = enabled
+  props.settings.proxy_runtime.clearance.mode = enabled ? 'manual' : 'none'
+}
 </script>

@@ -26,13 +26,13 @@
               v-model="settings.image_account_retry_enabled"
               :disabled="fieldReadOnly('image_account_retry_enabled')"
             >生图失败后尝试其他账号</Checkbox>
-            <HelpTip text="除文本结果（HTTP 400）外，当前账号未能交付图片时立即尝试其他账号；当前请求不会等待后台账号核验。" />
+            <HelpTip text="开启后，公开生图生成失败会立即换号，次数由「最大尝试账号数」限制；内容策略、文本结果、取消和内部错误不换号。关闭后登录失效直接失败，其他瞬时错误仍在同一账号上重试。" />
           </div>
         </div>
       </div>
       <FormField label="最大尝试账号数">
         <template #label-extra>
-          <HelpTip text="包含第一次使用的账号。默认 4，最小 2，不限制可填写的最大值。" />
+          <HelpTip text="公开生图生成阶段最多尝试多少个账号，含第一次。可用账号不足时会重复使用已有账号。" />
         </template>
         <SettingsNumberInput
           :field="imageMaxAccountAttemptsField"

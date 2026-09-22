@@ -481,12 +481,75 @@ class ImageWorkerManager:
         status_value = getattr(status, "value", str(status or ""))
         return status_value in {"leased", "running"}
 
+    def _persist_claim_exception_image_attempt(
+        self,
+        claim: ClaimedJob,
+        current_job: Any | None,
+        exc: Exception,
+        *,
+        stored_attempts_before: int | None = None,
+    ) -> None:
+        from services.image_failure import public_image_error_message
+        from services.log_service import collect_image_attempts
+
+        existing = collect_image_attempts(exc)
+        if existing:
+            return
+        if stored_attempts_before is not None:
+            # Older attempts already in the payload must not hide a new
+            # pre-execute failure. Skip only when this claim stored one.
+            stored_attempts_after = self._stored_image_attempt_count(claim)
+            if stored_attempts_after is not None and stored_attempts_after > stored_attempts_before:
+                return
+        elif current_job is not None:
+            existing = collect_image_attempts(getattr(current_job, "result_payload", None))
+            if existing:
+                return
+        email = ""
+        account_id = str(claim.account_id or "").strip()
+        if account_id:
+            try:
+                account = self.account_service.get_account_by_id(account_id)
+            except Exception:
+                account = None
+            if isinstance(account, dict):
+                email = str(account.get("email") or "").strip()
+            else:
+                email = str(getattr(account, "email", "") or "").strip()
+        failure = classify_image_exception(exc)
+        attempt = {
+            "slot": 1,
+            "attempt": 1,
+            "status": "text_review" if failure.outcome == "text" else "failed",
+            "account_email": email,
+            "account_id": account_id,
+            "public_error": public_image_error_message(failure),
+            **failure.diagnostic_fields(),
+        }
+        raw_error = str(exc or "").strip()
+        if raw_error:
+            attempt["raw_error"] = raw_error
+        append = getattr(self.repository, "append_image_attempts", None)
+        if not callable(append):
+            return
+        try:
+            append(claim, [attempt])
+        except Exception as persist_error:
+            logger.warning({
+                "event": "image_claim_attempt_persist_failed",
+                "task_id": str(claim.job.task_id),
+                "job_id": str(claim.job.id),
+                "error": str(persist_error),
+            })
+
     def _handle_claim_exception(
         self,
         claim: ClaimedJob,
         current_job: Any | None,
         exc: Exception,
         initial_stage: JobStage,
+        *,
+        stored_attempts_before: int | None = None,
     ) -> None:
         self._recent_error = str(exc)
         if (
@@ -495,6 +558,12 @@ class ImageWorkerManager:
         ):
             self.repository.release_claim(claim)
             return
+        self._persist_claim_exception_image_attempt(
+            claim,
+            current_job,
+            exc,
+            stored_attempts_before=stored_attempts_before,
+        )
         stage = current_job.stage if current_job is not None else initial_stage
         attempts = self._stage_attempts(current_job or claim.job, stage)
         decision = self.retry_policy.decision(stage, attempts, exc, datetime.now(timezone.utc))
@@ -507,10 +576,20 @@ class ImageWorkerManager:
             failure=failure,
             error=exc,
         )
-        if isinstance(exc, ClaimMaxRuntimeExceeded):
-            # A runtime timeout is not a generation error: the job may already own a
-            # downloaded or upscaled artifact. Stamp image_claim_timeout so the local
-            # recovery sweep picks it up instead of leaving it as internal_error.
+        stage_value = str(getattr(stage, "value", stage) or "").strip().lower()
+        download_or_save = stage_value in {
+            JobStage.RESOLVING.value,
+            JobStage.DOWNLOADING.value,
+            JobStage.TRANSFORMING.value,
+            JobStage.SAVING.value,
+        }
+        if isinstance(exc, ClaimMaxRuntimeExceeded) and (
+            bool(getattr(current_job or claim.job, "quota_consumed", False))
+            or download_or_save
+        ):
+            # Download/save timeouts may already own a local artifact. Stamp
+            # image_claim_timeout so the recovery sweep can resume instead of
+            # switching accounts and losing that work.
             self.repository.fail_timed_out_claim(
                 claim,
                 error_code="image_claim_timeout",
@@ -1498,10 +1577,25 @@ class ImageWorkerManager:
             with self._lock:
                 self._claim_in_flight = False
 
+    def _stored_image_attempt_count(self, claim: ClaimedJob) -> int | None:
+        getter = getattr(self.repository, "get_job", None)
+        if not callable(getter):
+            return None
+        try:
+            job = getter(claim.job.id)
+        except Exception:
+            return None
+        if job is None:
+            return 0
+        from services.log_service import collect_image_attempts
+
+        return len(collect_image_attempts(getattr(job, "result_payload", None)))
+
     def _run_claim(self, claim: ClaimedJob) -> None:
         initial_stage = claim.job.stage
         self.note_claim_stage(claim, initial_stage)
         accountless_recovery = claim.account_slot < 0
+        stored_attempts_before: int | None = None
         try:
             if (
                 self.repository.is_cancel_requested(claim.job.task_id)
@@ -1516,6 +1610,7 @@ class ImageWorkerManager:
                 ):
                     self._handle_claim_success(claim, initial_stage)
                 return
+            stored_attempts_before = self._stored_image_attempt_count(claim)
             access_token = (
                 ""
                 if accountless_recovery
@@ -1527,6 +1622,16 @@ class ImageWorkerManager:
             else:
                 self.execute_job(claim, access_token, runtime_guard)
         except LocalArtifactRecoveryUnavailable as exc:
+            # execute_claim already stores this failure before re-raising.
+            # Only write here when that store did not happen. Passing the
+            # current payload would let an older attempt hide this one.
+            stored_attempts_after = self._stored_image_attempt_count(claim)
+            if (
+                stored_attempts_before is None
+                or stored_attempts_after is None
+                or stored_attempts_after <= stored_attempts_before
+            ):
+                self._persist_claim_exception_image_attempt(claim, None, exc)
             self.repository.schedule_retry(
                 claim,
                 error_code="local_artifact_unavailable",
@@ -1536,7 +1641,13 @@ class ImageWorkerManager:
             return
         except Exception as exc:
             current_job = self.repository.get_job(claim.job.id)
-            self._handle_claim_exception(claim, current_job, exc, initial_stage)
+            self._handle_claim_exception(
+                claim,
+                current_job,
+                exc,
+                initial_stage,
+                stored_attempts_before=stored_attempts_before,
+            )
             return
         else:
             self._handle_claim_success(claim, initial_stage)

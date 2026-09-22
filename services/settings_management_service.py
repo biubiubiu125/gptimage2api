@@ -85,8 +85,6 @@ _SENSITIVE_PATHS = (
     ("genbox_push", "push_key"),
     ("backup", "secret_access_key"),
     ("backup", "passphrase"),
-    ("proxy_runtime", "clearance", "cf_cookies"),
-    ("proxy_runtime", "clearance", "cf_clearance"),
 )
 
 

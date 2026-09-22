@@ -79,11 +79,7 @@ class ProxyRuntimeProfile:
 
     @property
     def clearance_enabled(self) -> bool:
-        return (
-            self.runtime_enabled
-            and bool(self.clearance.get("enabled"))
-            and self.clearance_mode == "manual"
-        )
+        return bool(self.clearance.get("enabled")) and self.clearance_mode == "manual"
 
     @property
     def clearance_mode(self) -> str:
@@ -382,6 +378,39 @@ class ProxySettingsStore:
         if profile.skip_ssl_verify:
             session_kwargs["verify"] = False
         return chrome146_session_kwargs(session_kwargs)
+
+    @staticmethod
+    def merge_session_cookie_header(session: object) -> None:
+        """Copy the Cookie header into the session jar.
+
+        curl_cffi enables the cookie engine whenever the jar is non-empty and
+        then drops a manually set Cookie header. Settings clearance has to live
+        in the jar as well, and it must win over an account cookie of the same
+        name.
+        """
+        headers = getattr(session, "headers", None)
+        jar = getattr(session, "cookies", None)
+        if headers is None or jar is None:
+            return
+        cookie_key = _find_header_key(headers, "cookie")
+        if cookie_key is None:
+            return
+        parsed = _parse_cookie_header(str(headers.get(cookie_key) or ""))
+        if not parsed:
+            return
+        setter = getattr(jar, "set", None)
+        for name, value in parsed.items():
+            cookie_name = str(name or "").strip()
+            cookie_value = str(value or "").strip()
+            if not cookie_name or not cookie_value:
+                continue
+            try:
+                if callable(setter):
+                    setter(cookie_name, cookie_value)
+                else:
+                    jar[cookie_name] = cookie_value
+            except Exception:
+                continue
 
     def build_headers(
         self,
@@ -725,7 +754,7 @@ class ProxySettingsStore:
             return None
         cookies = _parse_cookie_header(str(profile.clearance.get("cf_cookies") or ""))
         cf_clearance = str(profile.clearance.get("cf_clearance") or "").strip()
-        if cf_clearance and "cf_clearance" not in cookies:
+        if cf_clearance:
             cookies["cf_clearance"] = cf_clearance
         configured_user_agent = str(profile.clearance.get("user_agent") or "").strip()
         if configured_user_agent and not is_chrome146_user_agent(configured_user_agent):
