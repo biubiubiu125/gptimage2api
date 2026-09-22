@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.5 - 2026-09-22
+
 + [修复] 日志列表/详情契约补齐管理端 `error` 和详情 `raw_detail`，有记录时不再因 `extra=forbid` 整页 500。
 + [修复] 控制台出图改走同源相对 `/images/{path}` 与 `/image-thumbnails/{path}`；worker 只用提交时的 `payload.base_url`，空值不再回填进程 `GPTIMAGE2API_BASE_URL`；`/v1` url 模式仍按请求 `base_url` 拼对外绝对地址。
 + [修复] 控制台任务契约收齐 `task_id`/`client_task_id`/`limit`/`offset`，HTTP 响应与 `ImageTaskRow`/`ImageTaskPage` 共用同一套 `extra=forbid`。
