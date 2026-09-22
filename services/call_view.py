@@ -7,6 +7,7 @@ from services.image_failure import (
     is_structured_failure,
     is_text_review_failure_code,
 )
+from services.image_url import to_same_origin_asset_url
 from services.request_detail_view import (
     build_request_detail_core,
     build_request_timeline_presentation,
@@ -161,9 +162,9 @@ def _urls_from(value: object) -> list[str]:
     urls: list[str] = []
     for item in value:
         if isinstance(item, Mapping):
-            url = _known_url(item.get("url"))
+            url = to_same_origin_asset_url(_known_url(item.get("url")))
         else:
-            url = _known_url(item)
+            url = to_same_origin_asset_url(_known_url(item))
         if url and url not in urls:
             urls.append(url)
     return urls
@@ -187,9 +188,9 @@ def call_business_kind(item: Mapping[str, Any]) -> str:
 
     if log_type == "account":
         return "account"
-    if endpoint.endswith("/images/generations"):
+    if endpoint.endswith("/images/generations") or endpoint.endswith("/image-tasks/generations"):
         return "image_generation"
-    if endpoint.endswith("/images/edits"):
+    if endpoint.endswith("/images/edits") or endpoint.endswith("/image-tasks/edits"):
         return "image_edit"
     if image_request:
         return "image_chat"

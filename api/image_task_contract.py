@@ -39,6 +39,8 @@ class ImageTaskRow(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
+    task_id: str = ""
+    client_task_id: str = ""
     status: ImageTaskStatus
     terminal: bool
     mode: ImageTaskMode
@@ -66,3 +68,5 @@ class ImageTaskPage(BaseModel):
 
     items: list[ImageTaskRow]
     missing_ids: list[str] = Field(default_factory=list)
+    limit: int = 100
+    offset: int = 0

@@ -127,13 +127,20 @@ def _configured_app_base_url() -> str:
         ) from exc
 
 
-def resolve_image_base_url(request: Request) -> str:
+def resolve_optional_image_base_url(request: Request) -> str:
     base_url = _configured_app_base_url()
     if base_url:
         return base_url
     hostname = str(request.url.hostname or "").strip()
     if _is_local_request_host(hostname):
         return f"{request.url.scheme}://{request.url.netloc}"
+    return ""
+
+
+def resolve_image_base_url(request: Request) -> str:
+    base_url = resolve_optional_image_base_url(request)
+    if base_url:
+        return base_url
     raise HTTPException(
         status_code=400,
         detail={

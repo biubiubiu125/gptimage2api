@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping
 
 from services.genbox_push_view import genbox_push_state
+from services.image_url import build_console_image_url, build_console_thumbnail_url
 from utils.timezone import beijing_now, parse_to_beijing_naive
 
 
@@ -81,12 +82,18 @@ def gallery_row(
     expired, expires_at, expires_in_seconds = (
         _expiry(item, retention_hours) if local else (False, None, None)
     )
+    if local and path:
+        url = build_console_image_url(path)
+        thumbnail_url = build_console_thumbnail_url(path)
+    else:
+        url = _text(item.get("url")) or (f"{base_url.rstrip('/')}/images/{path}" if path else "")
+        thumbnail_url = _thumbnail_url(base_url, path) if path else ""
     return {
         "id": path,
         "path": path,
         "filename": filename,
-        "url": _text(item.get("url")) or f"{base_url.rstrip('/')}/images/{path}",
-        "thumbnail_url": _thumbnail_url(base_url, path),
+        "url": url,
+        "thumbnail_url": thumbnail_url,
         "size_bytes": _non_negative_int(item.get("size") or item.get("size_bytes")),
         "created_at": _text(item.get("created_at")),
         "date": _text(item.get("date")),

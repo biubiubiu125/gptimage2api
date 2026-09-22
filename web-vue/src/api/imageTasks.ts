@@ -19,6 +19,8 @@ export interface ImageTaskActions {
 
 export interface ImageTask {
   id: string
+  task_id: string
+  client_task_id: string
   status: ImageTaskStatus
   terminal: boolean
   mode: ImageTaskMode
@@ -44,6 +46,8 @@ export interface ImageTask {
 export interface ImageTasksResponse {
   items: ImageTask[]
   missing_ids: string[]
+  limit: number
+  offset: number
 }
 
 export interface CreateGenerationTaskInput {
@@ -290,6 +294,8 @@ function parseImageTask(value: unknown, path = 'response'): ImageTask {
   const actions = expectObject(raw.actions, `${path}.actions`)
   return {
     id: expectString(raw.id, `${path}.id`),
+    task_id: expectString(raw.task_id, `${path}.task_id`),
+    client_task_id: expectString(raw.client_task_id, `${path}.client_task_id`),
     status,
     terminal,
     mode: expectImageTaskMode(raw.mode, `${path}.mode`),
@@ -323,6 +329,8 @@ function parseImageTasksResponse(value: unknown): ImageTasksResponse {
   return {
     items: response.items.map((item, index) => parseImageTask(item, `response.items[${index}]`)),
     missing_ids: response.missing_ids.map((id, index) => expectString(id, `response.missing_ids[${index}]`)),
+    limit: expectInteger(response.limit, 'response.limit'),
+    offset: expectInteger(response.offset, 'response.offset'),
   }
 }
 
@@ -372,6 +380,7 @@ function localImageUrl(path: string) {
 }
 
 export function imageAssetUrl(asset: ImageTaskAsset) {
+  if (cleanString(asset.path)) return localImageUrl(asset.path)
   const url = cleanString(asset.url)
   if (url) return url
   const base64 = cleanString(asset.b64_json)

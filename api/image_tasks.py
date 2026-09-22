@@ -11,13 +11,13 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from api.image_task_contract import ImageTaskStatus
+from api.image_task_contract import ImageTaskPage, ImageTaskRow
 from api.image_inputs import image_edit_source_request_hash, parse_image_edit_request, read_image_source_groups
 from api.support import (
     allowlisted_trace_headers,
     require_admin,
     require_identity,
-    resolve_image_base_url,
+    resolve_optional_image_base_url,
 )
 from services.content_filter import check_request
 from services.account_service import account_service
@@ -79,46 +79,8 @@ class ResumePollRequest(BaseModel):
     )
 
 
-class ImageTaskAssetResponse(BaseModel):
-    url: str = ""
-    path: str = ""
-    b64_json: str = ""
-    revised_prompt: str = ""
-    width: int | None = None
-    height: int | None = None
-
-
-class ImageTaskResponse(BaseModel):
-    id: str
-    task_id: str = ""
-    client_task_id: str = ""
-    status: ImageTaskStatus
-    terminal: bool
-    mode: str
-    model: str
-    size: str
-    quality: str
-    stage_code: str
-    stage_label: str
-    created_at: str
-    updated_at: str
-    requested_count: int = Field(ge=1, le=4)
-    succeeded_count: int = Field(default=0, ge=0)
-    failed_count: int = Field(default=0, ge=0)
-    pending_count: int = Field(default=0, ge=0)
-    duration_ms: int | None = Field(default=None, ge=0)
-    elapsed_ms: int | None = Field(default=None, ge=0)
-    error_code: str = ""
-    public_error: str = ""
-    results: list[ImageTaskAssetResponse] = Field(default_factory=list)
-    actions: dict[str, bool] = Field(default_factory=lambda: {"resume_poll": False, "cancel": False})
-
-
-class ImageTasksResponse(BaseModel):
-    items: list[ImageTaskResponse] = Field(default_factory=list)
-    missing_ids: list[str] = Field(default_factory=list)
-    limit: int = 100
-    offset: int = 0
+ImageTaskResponse = ImageTaskRow
+ImageTasksResponse = ImageTaskPage
 
 
 class ImageQuotaResponse(BaseModel):
@@ -532,7 +494,7 @@ def create_router() -> APIRouter:
                     n=body.n,
                     size=body.size,
                     quality=body.quality,
-                    base_url=resolve_image_base_url(request),
+                    base_url=resolve_optional_image_base_url(request),
                     idempotency_key=idempotency_key,
                     trace_headers=trace_headers,
                     source_endpoint="/api/image-tasks/generations",
@@ -659,7 +621,7 @@ def create_router() -> APIRouter:
                 n=payload.get("n", 1),
                 size=payload["size"],
                 quality=payload["quality"],
-                base_url=resolve_image_base_url(request),
+                base_url=resolve_optional_image_base_url(request),
                 images=images,
                 masks=masks,
                 idempotency_key=idempotency_key,

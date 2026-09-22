@@ -83,3 +83,53 @@ def build_public_thumbnail_url_for_image_url(image_url: object, relative_path: o
     base_path = path[: -len(image_suffix)].rstrip("/")
     base = parsed._replace(path=base_path, query="", fragment="").geturl().rstrip("/")
     return build_public_thumbnail_url(base, rel)
+
+
+def build_console_image_url(relative_path: object) -> str:
+    return build_public_image_url("", relative_path)
+
+
+def build_console_thumbnail_url(relative_path: object) -> str:
+    return build_public_thumbnail_url("", relative_path)
+
+
+def _owned_image_base_url() -> str:
+    try:
+        from services.config import config
+
+        return str(config.base_url or "").strip()
+    except ValueError:
+        return ""
+
+
+def _is_console_owned_asset_url(parsed) -> bool:
+    from services.image_delivery import _is_local_or_private_host
+
+    if _is_local_or_private_host(parsed.hostname or ""):
+        return True
+    owned = normalize_url_origin(_owned_image_base_url())
+    actual = normalize_url_origin(parsed.geturl())
+    return owned is not None and actual is not None and owned == actual
+
+
+def to_same_origin_asset_url(url: object) -> str:
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        return text
+    path = parsed.path or ""
+    if not (path.startswith("/images/") or path.startswith("/image-thumbnails/")):
+        return text
+    local = path
+    if parsed.query:
+        local += f"?{parsed.query}"
+    if parsed.fragment:
+        local += f"#{parsed.fragment}"
+    if not parsed.scheme or not parsed.netloc:
+        return local
+    if _is_console_owned_asset_url(parsed):
+        return local
+    return text

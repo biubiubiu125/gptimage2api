@@ -180,6 +180,7 @@ class CallSummary(BaseModel):
     status_code: int = Field(ge=0)
     error_code: str
     public_error: str
+    error: str = ""
     image_requested_count: int = Field(ge=0)
     image_succeeded_count: int = Field(ge=0)
     image_failed_count: int = Field(ge=0)
@@ -206,6 +207,7 @@ class AttemptSummary(BaseModel):
     error_code: str
     error_label: str
     public_error: str
+    error: str = ""
     upstream_error: str
     upstream_text: str
     switched_account: bool | None
@@ -222,6 +224,7 @@ class CallDetail(CallSummary):
     request_meta: dict[str, Any] = Field(default_factory=dict)
     upstream_error: str
     upstream_text: str
+    raw_detail: dict[str, Any] | list[Any] | str = ""
     image_urls: list[str] = Field(default_factory=list)
     attempts: list[AttemptSummary] = Field(default_factory=list)
     timings_ms: dict[str, int] = Field(default_factory=dict)

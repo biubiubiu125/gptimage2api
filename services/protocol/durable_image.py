@@ -18,14 +18,30 @@ from services.image_failure import (
     public_image_error_message,
 )
 from services.image_queue.artifact_service import InvalidImageArtifact
-from services.image_delivery import is_url_only_result
+from services.image_delivery import is_public_delivery_base_url, is_url_only_result
 from services.image_task_service import image_task_service
+from services.image_url import build_public_image_url
 from services.protocol.conversation import ImageOutput
 
 
 _PREPARED_RESULT_KEY = "_durable_image_prepared_result"
 _SUBMISSION_KEY = "_durable_image_submission"
 _ALLOWED_RESPONSE_FORMATS = {"b64_json", "url"}
+
+
+def _protocol_result_url(
+    request_payload: Mapping[str, Any],
+    relative_path: str,
+    stored_url: str,
+) -> str:
+    base = str((request_payload or {}).get("base_url") or "").strip()
+    rel = str(relative_path or "").strip().lstrip("/")
+    if base and rel:
+        return build_public_image_url(base, rel)
+    stored = str(stored_url or "").strip()
+    if is_public_delivery_base_url(stored):
+        return stored
+    return ""
 
 
 def normalize_response_format(value: object, default: str = "b64_json") -> str:
@@ -322,12 +338,23 @@ def _result(
             data.append(item)
             continue
         if response_format != "b64_json" and is_url_only_result(raw_item):
+            url = _protocol_result_url(request_payload, relative_path, url)
             if not url:
                 _invalid_image_result_error(
                     identity,
                     task_id,
                     "已保存的图片 URL 不可用。",
                     item=raw_item,
+                )
+            expected_path = f"/images/{relative_path.lstrip('/')}".rstrip("/")
+            parsed_url = urlsplit(url)
+            if parsed_url.path.rstrip("/") != expected_path:
+                _invalid_image_result_error(
+                    identity,
+                    task_id,
+                    "已保存的图片 URL 与产物路径不一致。",
+                    item=raw_item,
+                    extra=f"expected_path={expected_path}",
                 )
             item["url"] = url
             image_urls.append(url)
@@ -354,6 +381,7 @@ def _result(
         if response_format == "b64_json":
             item["b64_json"] = base64.b64encode(payload_bytes).decode("ascii")
         else:
+            url = _protocol_result_url(request_payload, relative_path, url)
             if not url:
                 _invalid_image_result_error(
                     identity,

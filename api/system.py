@@ -38,7 +38,7 @@ from contracts.settings import (
     SettingsView,
 )
 from contracts.updates import UpdateStatusView, UpdateTaskView
-from api.support import require_admin, require_identity, resolve_image_base_url
+from api.support import require_admin, require_identity, resolve_optional_image_base_url
 from services.account_service import account_service
 from services.auth_view import build_auth_view
 from services.backup_service import BackupError, backup_service
@@ -404,7 +404,7 @@ def create_router(app_version: str) -> APIRouter:
         require_admin(authorization)
         return await run_in_threadpool(
             list_images,
-            resolve_image_base_url(request),
+            resolve_optional_image_base_url(request),
             start_date=start_date.strip(),
             end_date=end_date.strip(),
             limit=page_size,

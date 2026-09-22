@@ -5,6 +5,8 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
+from services.image_url import build_console_image_url, to_same_origin_asset_url
+
 TERMINAL_STATUSES = frozenset({"succeeded", "partial_success", "failed", "cancelled"})
 
 _STAGE_LABELS = {
@@ -81,10 +83,10 @@ def _asset_dimension(value: object) -> int | None:
 def _asset(raw: object) -> dict[str, Any] | None:
     if not isinstance(raw, Mapping):
         return None
-    path = raw.get("path") or raw.get("relative_path")
+    path = _text(raw.get("path") or raw.get("relative_path"))
     result: dict[str, Any] = {
-        "url": _text(raw.get("url")),
-        "path": _text(path),
+        "url": build_console_image_url(path) if path else to_same_origin_asset_url(raw.get("url")),
+        "path": path,
         "b64_json": _text(raw.get("b64_json")),
         "revised_prompt": _text(raw.get("revised_prompt")),
     }

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
++ [修复] 日志列表/详情契约补齐管理端 `error` 和详情 `raw_detail`，有记录时不再因 `extra=forbid` 整页 500。
++ [修复] 控制台出图改走同源相对 `/images/{path}` 与 `/image-thumbnails/{path}`；worker 只用提交时的 `payload.base_url`，空值不再回填进程 `GPTIMAGE2API_BASE_URL`；`/v1` url 模式仍按请求 `base_url` 拼对外绝对地址。
++ [修复] 控制台任务契约收齐 `task_id`/`client_task_id`/`limit`/`offset`，HTTP 响应与 `ImageTaskRow`/`ImageTaskPage` 共用同一套 `extra=forbid`。
++ [修复] 画廊本地图不再把相对 `/images/` 拼到 `VITE_API_URL`；日志同源改写收本机/内网和已配置的公开 `BASE_URL`，第三方 CDN 即使 path 碰巧是 `/images/` 也不改写。
++ [修复] 日志落库优先用产物 `relative_path` 写成同源 `/images/{path}`，不再把对外绝对地址写进管理端预览。
++ [修复] 控制台 `/api/image-tasks/generations|edits` 日志按文生图/图生图分类，不再落成 other 或对话生图。
++ [修复] `/v1` url-only 结果也校验公开 path 与产物路径一致。
++ [修复] 控制台画廊列表和 `/api/image-tasks` 创建不再强要对外 `GPTIMAGE2API_BASE_URL`；没配时走同源相对 `/images/`，`/v1` 公开 url 模式仍必须配置。
++ [修复] `/v1` url 模式不再把容器内网 stored URL 回落给 NewAPI；没有请求 `base_url` 时只接受公网 stored URL。
++ [修复] 日志预览同源改写与后端对齐：本机/内网和当前 `apiBaseUrl` 同源的 `/images/` 改成相对路径；详情 `raw_detail` 类型收齐 object/array/string。
++ [修复] 控制台任务前端契约补齐 `task_id`/`client_task_id`/`limit`/`offset`，与后端 `ImageTaskRow`/`ImageTaskPage` 对齐。
+
 ## 1.0.4 - 2026-09-21
 
 + [修复] 登录管理端后不再因磁盘上残留的成功更新任务整页死循环刷新。成功态只展示一次就清掉，前端只为当前浏览器自己发起且尚未刷新过的任务自动 reload；`index.html` 不再被缓存。

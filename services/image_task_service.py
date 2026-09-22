@@ -26,7 +26,7 @@ from services.image_failure import (
     image_failure,
 )
 from services.image_task_view import canonical_image_task_status
-from services.image_url import build_public_image_url
+from services.image_url import build_console_image_url, build_public_image_url
 from services.proxy_service import proxy_settings
 from services.returned_url_verifier import verify_returned_image_url
 from services.image_queue.artifact_service import ArtifactService, InvalidImageArtifact
@@ -98,6 +98,24 @@ def _owner_key(identity: Mapping[str, object] | str) -> str:
     if isinstance(identity, str):
         return identity.strip() or "anonymous"
     return _clean(identity.get("id") or identity.get("key") or identity.get("name"), "anonymous")
+
+
+def _console_log_image_urls(items: Sequence[object]) -> list[str]:
+    image_urls: list[str] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        relative_path = _clean(item.get("relative_path"))
+        if relative_path:
+            value = build_console_image_url(relative_path)
+            if value and value not in image_urls:
+                image_urls.append(value)
+            continue
+        for key in ("url", "returned_url", "upscaled_url"):
+            value = _clean(item.get(key))
+            if value and value not in image_urls:
+                image_urls.append(value)
+    return image_urls
 
 
 def _public_result_item(value: object) -> dict[str, Any]:
@@ -306,14 +324,7 @@ class ImageTaskService:
         duration_ms = 0
         if started_at is not None and ended_at is not None:
             duration_ms = max(0, int((ended_at - started_at).total_seconds() * 1000))
-        image_urls = []
-        for item in task.data:
-            if not isinstance(item, Mapping):
-                continue
-            for key in ("url", "returned_url", "upscaled_url"):
-                value = _clean(item.get(key))
-                if value and value not in image_urls:
-                    image_urls.append(value)
+        image_urls = _console_log_image_urls(task.data)
         error_code = _clean(task.error_code)
         if public_status == "cancelled" and not error_code:
             error_code = "image_task_cancelled"
@@ -430,11 +441,8 @@ class ImageTaskService:
                 "error": str(exc),
             })
 
-    def _worker_image_base_url(self) -> str:
-        return _clean(config.base_url)
-
     def _delivery_base_url(self, payload: Mapping[str, Any]) -> str:
-        return self._worker_image_base_url() or _clean(payload.get("base_url"))
+        return _clean(payload.get("base_url"))
 
     @staticmethod
     def _artifact_storage_service():
@@ -2179,8 +2187,7 @@ class ImageTaskService:
             account_email = _clean((account or {}).get("email"))
         except Exception:
             account_email = ""
-        worker_image_base_url = self._worker_image_base_url()
-        delivery_base_url = worker_image_base_url or _clean(payload.get("base_url"))
+        delivery_base_url = self._delivery_base_url(payload)
         url_only_delivery = is_public_delivery_base_url(delivery_base_url)
         artifact_history = repository.list_artifacts(claim.job.task_id)
 

@@ -162,7 +162,7 @@ export type CallDetail = CallSummary & {
   metrics: Record<string, unknown>
   monitor: Record<string, unknown>
   detail_presentation: CallDetailPresentation
-  raw_detail?: Record<string, unknown>
+  raw_detail?: Record<string, unknown> | unknown[] | string
 }
 
 export type SystemLog = CallSummary & {
@@ -268,6 +268,60 @@ function cleanString(value: unknown): string {
   return String(value || '').trim()
 }
 
+function isLocalOrPrivateHost(hostname: string): boolean {
+  const value = hostname.trim().replace(/^\[|\]$/g, '').toLowerCase()
+  if (!value) return true
+  if (
+    value === 'localhost'
+    || value === 'localhost.localdomain'
+    || value.endsWith('.localhost')
+    || value.endsWith('.local')
+    || value === 'host.docker.internal'
+  ) {
+    return true
+  }
+  const ipv4 = value.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  if (ipv4) {
+    const octets = ipv4.slice(1).map(Number)
+    if (octets.some((part) => part > 255)) return false
+    const [a, b] = octets
+    if (a === 10 || a === 127 || a === 0 || a >= 224) return true
+    if (a === 169 && b === 254) return true
+    if (a === 172 && b >= 16 && b <= 31) return true
+    if (a === 192 && b === 168) return true
+    return false
+  }
+  if (!value.includes(':')) return false
+  if (
+    value === '::'
+    || value === '::1'
+    || value === '0:0:0:0:0:0:0:0'
+    || value === '0:0:0:0:0:0:0:1'
+  ) {
+    return true
+  }
+  if (value.startsWith('fc') || value.startsWith('fd') || value.startsWith('fe80') || value.startsWith('ff')) return true
+  return false
+}
+
+function previewOriginKey(value: string): string {
+  const parsed = new URL(value)
+  const host = parsed.hostname.replace(/\.$/, '').toLowerCase()
+  const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80')
+  return `${parsed.protocol}//${host}:${port}`
+}
+
+function isOwnedPreviewOrigin(parsed: URL, apiBaseUrl: string): boolean {
+  if (isLocalOrPrivateHost(parsed.hostname)) return true
+  const base = cleanString(apiBaseUrl)
+  if (!base) return false
+  try {
+    return previewOriginKey(parsed.href) === previewOriginKey(base)
+  } catch {
+    return false
+  }
+}
+
 function normalizePreviewUrl(url: string, apiBaseUrl = ''): string {
   const value = cleanString(url)
   if (!value || value.startsWith('file-service://')) return ''
@@ -276,7 +330,10 @@ function normalizePreviewUrl(url: string, apiBaseUrl = ''): string {
   if (/^https?:\/\//i.test(value)) {
     try {
       const parsed = new URL(value)
-      if (parsed.pathname.startsWith('/images/') || parsed.pathname.startsWith('/image-thumbnails/')) {
+      if (
+        (parsed.pathname.startsWith('/images/') || parsed.pathname.startsWith('/image-thumbnails/'))
+        && isOwnedPreviewOrigin(parsed, apiBaseUrl)
+      ) {
         return `${parsed.pathname}${parsed.search}${parsed.hash}`
       }
     } catch {
@@ -388,6 +445,7 @@ export function normalizeSystemLogDetail(item: CallDetail, options: NormalizeSys
   const imageUrls = normalizePreviewUrls(sourceUrls, options.apiBaseUrl)
   const detail: Record<string, any> = {
     ...rawDetail,
+    raw_detail: item.raw_detail,
     call_id: item.id,
     endpoint: item.endpoint,
     model: item.model,

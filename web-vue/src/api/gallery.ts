@@ -127,6 +127,8 @@ function defaultFileBaseUrl(): string {
 export function resolveGalleryFileUrl(url: string, baseUrl = defaultFileBaseUrl()): string {
   const raw = cleanString(url)
   if (!raw) return ''
+  if (raw.startsWith('/images/') || raw.startsWith('/image-thumbnails/')) return raw
+  if (raw.startsWith('images/') || raw.startsWith('image-thumbnails/')) return `/${raw}`
   if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return raw
   if (raw.startsWith('//')) {
     const protocol = typeof window !== 'undefined' ? window.location.protocol : 'https:'
